@@ -103,6 +103,7 @@ polygon editor over a live snapshot for motion zones and privacy masks.
 python3 test_api.py        # pure-logic checks, prints "ok"
 python3 e2e_drive.py       # full end-to-end run, needs a working ZoneMinder
 python3 shots.py OUTDIR    # demo data + the screenshots above (needs Xvfb)
+python3 tools/make_icon.py porchlight.png logo48.png   # redraws the app icon
 ```
 
 - `server/zmapi.py` — everything that talks to ZoneMinder: REST API, token auth,
