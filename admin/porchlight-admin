@@ -1,0 +1,106 @@
+#!/bin/sh
+# Root-only helper for Porchlight. Invoked through pkexec; every action is
+# restricted to the fixed set below so the GUI can never pass an arbitrary command.
+set -e
+
+CRON=/etc/cron.d/porchlight
+
+die() { echo "$1" >&2; exit 1; }
+
+zm_conf() { sed -n "s/^$1=//p" /etc/zm/zm.conf | head -1; }
+
+zm_mysql() {
+    mysql -u"$(zm_conf ZM_DB_USER)" -p"$(zm_conf ZM_DB_PASS)" "$(zm_conf ZM_DB_NAME)" "$@"
+}
+
+restart_zm() {
+    if [ -d /run/systemd/system ]; then
+        systemctl restart zoneminder || true
+    else
+        service zoneminder restart >/dev/null 2>&1 || zmpkg.pl restart >/dev/null 2>&1 || true
+    fi
+}
+
+case "$1" in
+restart)
+    if [ -d /run/systemd/system ]; then
+        systemctl restart mariadb 2>/dev/null || systemctl restart mysql 2>/dev/null || true
+        systemctl restart apache2 || true
+        systemctl restart zoneminder || true
+    else
+        service mariadb restart >/dev/null 2>&1 || service mysql restart >/dev/null 2>&1 || true
+        service apache2 restart >/dev/null 2>&1 || true
+        zmpkg.pl restart >/dev/null 2>&1 || true
+    fi
+    echo "restarted"
+    ;;
+
+set-config)
+    [ -n "$2" ] || die "usage: set-config NAME VALUE"
+    case "$2" in
+        ZM_*) ;;
+        *) die "only ZM_* settings can be changed" ;;
+    esac
+    printf 'UPDATE Config SET Value=%s WHERE Name=%s;\n' \
+        "$(printf "'%s'" "$(printf '%s' "$3" | sed "s/'/''/g")")" \
+        "$(printf "'%s'" "$(printf '%s' "$2" | sed "s/'/''/g")")" | zm_mysql
+    restart_zm
+    echo "saved $2"
+    ;;
+
+schedule)
+    # stdin-free: the cron body is argument 2, one crontab line per newline.
+    if [ -z "$2" ]; then
+        rm -f "$CRON"
+        echo "schedule cleared"
+        exit 0
+    fi
+    {
+        echo "# Written by Porchlight. Edits here are overwritten."
+        echo "SHELL=/bin/sh"
+        echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        printf '%s\n' "$2"
+    } > "$CRON"
+    chmod 644 "$CRON"
+    echo "schedule saved"
+    ;;
+
+logs)
+    lines="${2:-200}"
+    case "$lines" in *[!0-9]*) die "bad line count" ;; esac
+    tail -n "$lines" /var/log/zm/zmdc.log /var/log/zm/zmpkg.log 2>/dev/null \
+        || tail -n "$lines" /var/log/zm/*.log 2>/dev/null \
+        || echo "no logs yet"
+    ;;
+
+test-email)
+    [ -n "$2" ] || die "no address given"
+    python3 - "$2" <<'PY'
+import smtplib, sys
+from email.message import EmailMessage
+
+def conf(key, default=""):
+    with open("/etc/zm/zm.conf") as fh:
+        for line in fh:
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip()
+    return default
+
+to = sys.argv[1]
+host = conf("ZM_EMAIL_HOST") or "localhost"
+sender = conf("ZM_FROM_EMAIL") or "porchlight@localhost"
+msg = EmailMessage()
+msg["Subject"] = "Porchlight test email"
+msg["From"] = sender
+msg["To"] = to
+msg.set_content("This is a test from Porchlight. Your cameras can email you.")
+with smtplib.SMTP(host, 25, timeout=20) as s:
+    s.send_message(msg)
+print("sent to", to, "via", host)
+PY
+    ;;
+
+*)
+    die "unknown action: $1"
+    ;;
+esac

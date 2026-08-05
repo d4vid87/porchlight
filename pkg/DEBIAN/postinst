@@ -1,0 +1,94 @@
+#!/bin/sh
+# Configure ZoneMinder so the user never has to. Safe to run again.
+set -e
+
+[ "$1" = "configure" ] || exit 0
+
+SQL=/usr/share/zoneminder/db/zm_create.sql
+
+start() {
+    if [ -d /run/systemd/system ]; then
+        systemctl enable --now "$1" >/dev/null 2>&1 || true
+    else
+        service "$1" start >/dev/null 2>&1 || true   # containers, chroots
+    fi
+}
+
+start mariadb
+start mysql
+
+# Wait for the database socket; a fresh mariadb takes a few seconds.
+i=0
+while ! mysqladmin ping >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -gt 30 ] && break
+    sleep 1
+done
+
+if mysqladmin ping >/dev/null 2>&1; then
+    if ! mysql -e 'use zm' >/dev/null 2>&1 && [ -f "$SQL" ]; then
+        mysql < "$SQL"
+    fi
+    # MySQL 8 needs CREATE USER; the old "GRANT ... IDENTIFIED BY" is gone.
+    DBUSER=$(sed -n 's/^ZM_DB_USER=//p' /etc/zm/zm.conf | head -1)
+    DBPASS=$(sed -n 's/^ZM_DB_PASS=//p' /etc/zm/zm.conf | head -1)
+    DBNAME=$(sed -n 's/^ZM_DB_NAME=//p' /etc/zm/zm.conf | head -1)
+    mysql -e "create user if not exists '${DBUSER:-zmuser}'@'localhost' identified by '${DBPASS:-zmpass}';
+              alter user '${DBUSER:-zmuser}'@'localhost' identified by '${DBPASS:-zmpass}';
+              grant all on \`${DBNAME:-zm}\`.* to '${DBUSER:-zmuser}'@'localhost';
+              flush privileges;" || true
+    # The privacy consent page hides every image and video URL behind a form
+    # nobody sees when the pictures are embedded in our own UI.
+    mysql -e "update \`${DBNAME:-zm}\`.Config set Value='0' where Name='ZM_SHOW_PRIVACY';" \
+        >/dev/null 2>&1 || true
+    zmupdate.pl -f >/dev/null 2>&1 || true
+else
+    # Never fail the install over this - the app's "Fix it" button retries.
+    echo "porchlight: database not running yet; open Porchlight and click \"Fix it\"." >&2
+fi
+
+a2enmod cgi rewrite >/dev/null 2>&1 || true
+a2enconf zoneminder >/dev/null 2>&1 || true
+
+chown -R www-data:www-data /var/cache/zoneminder 2>/dev/null || true
+
+# The web pages read the config; without this every page is a 500.
+chgrp -R www-data /etc/zm 2>/dev/null || true
+chmod -R g+r /etc/zm 2>/dev/null || true
+chmod g+x /etc/zm 2>/dev/null || true
+
+# The Ubuntu package ships the API without CakePHP's rewrite rules, so every
+# API URL 404s. Put them back.
+API=/usr/share/zoneminder/www/api
+if [ -d "$API" ] && [ ! -f "$API/.htaccess" ]; then
+    cat > "$API/.htaccess" <<'EOF'
+<IfModule mod_rewrite.c>
+    RewriteEngine on
+    RewriteRule    ^$ app/webroot/    [L]
+    RewriteRule    (.*) app/webroot/$1 [L]
+</IfModule>
+EOF
+    cat > "$API/app/.htaccess" <<'EOF'
+<IfModule mod_rewrite.c>
+    RewriteEngine on
+    RewriteRule    ^$    webroot/    [L]
+    RewriteRule    (.*) webroot/$1    [L]
+</IfModule>
+EOF
+    cat > "$API/app/webroot/.htaccess" <<'EOF'
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L]
+</IfModule>
+EOF
+fi
+
+start apache2
+if [ -d /run/systemd/system ]; then
+    systemctl reload apache2 >/dev/null 2>&1 || true
+fi
+start zoneminder
+
+exit 0

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Porchlight
+Comment=Add and manage your security cameras
+Exec=porchlight
+Icon=porchlight
+Terminal=false
+Categories=AudioVideo;Video;

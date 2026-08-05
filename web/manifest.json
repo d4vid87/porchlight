@@ -1,0 +1,10 @@
+{
+  "name": "Porchlight",
+  "short_name": "Porchlight",
+  "description": "Your security cameras",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#12141a",
+  "theme_color": "#12141a",
+  "icons": [{ "src": "logo.png", "sizes": "48x48", "type": "image/png" }]
+}

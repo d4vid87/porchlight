@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Porchlight</title>
+<link rel="icon" href="logo.png">
+<link rel="manifest" href="manifest.json">
+<script>document.documentElement.dataset.theme = localStorage.theme || "dark";</script>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header id="topnav">
+  <div class="brand"><img src="logo.png" alt=""><span>Porchlight</span></div>
+  <nav class="links">
+    <a data-page="cameras" class="active">Cameras</a>
+    <a data-page="live">Live view</a>
+    <a data-page="recordings">Recordings</a>
+    <a data-page="rules">Rules</a>
+    <a data-page="modes">Home / Away</a>
+    <a data-page="people">People</a>
+    <a data-page="system">System</a>
+  </nav>
+  <div class="spacer"></div>
+  <button id="theme-btn" class="link" title="Switch between dark and light"></button>
+  <div id="health" class="health"></div>
+</header>
+
+<main>
+  <section id="page-cameras" class="page">
+    <header><h1>Cameras</h1><div class="row"><button id="btn-live">Start live views</button><button class="primary" id="btn-add">Add a camera</button></div></header>
+    <div id="tiles" class="tiles"></div>
+    <div id="camera-grid" class="grid"></div>
+  </section>
+
+  <section id="page-live" class="page hidden">
+    <header>
+      <h1>Live view</h1>
+      <div class="toolbar">
+        <label>Layout
+          <select id="live-layout">
+            <option value="1">1 camera</option>
+            <option value="4" selected>4 cameras</option>
+            <option value="9">9 cameras</option>
+            <option value="16">16 cameras</option>
+          </select>
+        </label>
+        <label>Quality
+          <select id="live-quality">
+            <option value="30">Low</option>
+            <option value="50" selected>Normal</option>
+            <option value="100">Full</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="live-cycle"> Cycle through cameras</label>
+      </div>
+    </header>
+    <p class="hint">Click a picture to fill the screen with it.</p>
+    <div id="live-grid" class="live-grid"></div>
+  </section>
+
+  <section id="page-recordings" class="page hidden">
+    <header>
+      <h1>Recordings</h1>
+      <div class="toolbar">
+        <label>Camera <select id="rec-camera"><option value="">All</option></select></label>
+        <label>Day <input type="date" id="rec-date"></label>
+        <label>Show
+          <select id="rec-cause">
+            <option value="">Everything</option>
+            <option value="Motion">Movement only</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="rec-kept"> Kept forever only</label>
+      </div>
+    </header>
+    <div id="rec-grid" class="grid"></div>
+    <div class="center"><button id="rec-more" class="hidden">Show more</button></div>
+  </section>
+
+  <section id="page-rules" class="page hidden">
+    <header><h1>Rules</h1><div><button class="primary" id="btn-rule">New rule</button></div></header>
+    <p class="hint">Rules run in the background and act on recordings as they arrive.</p>
+    <div id="rule-list" class="list"></div>
+    <h2>Phone alerts</h2>
+    <div class="card pad">
+      <p class="hint">Install the free <strong>ntfy</strong> app on your phone (App Store or
+        Google Play), then subscribe to the topic below. Rules with “Send an alert to my
+        phone” ticked will ring it.</p>
+      <div class="fields">
+        <label>Your topic <input id="push-topic" placeholder="loading..."></label>
+        <label>Alert service <input id="push-server" placeholder="https://ntfy.sh"></label>
+      </div>
+      <div class="row">
+        <button id="push-new">Make a new topic</button>
+        <button id="push-test">Send a test alert</button>
+        <span id="push-msg" class="muted"></span>
+      </div>
+      <p class="hint">The topic is an unguessable name on the public ntfy.sh server; no
+        account, no video leaves this computer. Run your own ntfy and put its address in
+        “Alert service” if you'd rather.</p>
+    </div>
+    <h2>Email</h2>
+    <div class="card pad">
+      <label class="check"><input type="checkbox" id="email-on"> Let Porchlight send email</label>
+      <div class="fields">
+        <label>Mail server <input id="email-host" placeholder="smtp.example.com"></label>
+        <label>Send to <input id="email-to" placeholder="you@example.com"></label>
+        <label>Send from <input id="email-from" placeholder="cameras@example.com"></label>
+      </div>
+      <div class="row">
+        <button id="email-save">Save</button>
+        <button id="email-test">Send a test email</button>
+        <span id="email-msg" class="muted"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="page-modes" class="page hidden">
+    <header><h1>Home / Away</h1></header>
+    <p class="hint">Pick what the cameras do when you're in or out.</p>
+    <div class="row big-toggles" id="state-buttons"></div>
+    <h2>What each mode does</h2>
+    <div class="row">
+      <label>Editing <select id="state-pick"></select></label>
+      <button id="state-save" class="primary">Save this mode</button>
+      <span id="state-msg" class="muted"></span>
+    </div>
+    <div id="state-rows" class="list"></div>
+    <h2>Switch automatically</h2>
+    <div id="sched-rows" class="list"></div>
+    <div class="row">
+      <button id="sched-add">Add a time</button>
+      <button id="sched-save" class="primary">Save schedule</button>
+      <span id="sched-msg" class="muted"></span>
+    </div>
+  </section>
+
+  <section id="page-people" class="page hidden">
+    <header><h1>People</h1><div><button class="primary" id="btn-user">Add a person</button></div></header>
+    <div class="card pad">
+      <label class="check"><input type="checkbox" id="auth-on"> Ask for a password before showing cameras</label>
+      <p class="hint">Turn this on if other people use this computer or you open the cameras to your network.</p>
+    </div>
+    <div id="user-list" class="list"></div>
+  </section>
+
+  <section id="page-system" class="page hidden">
+    <header><h1>System</h1><div><button id="btn-restart">Restart the camera system</button></div></header>
+    <div id="sys-summary" class="grid"></div>
+    <h2>Watch from your phone</h2>
+    <div class="card pad">
+      <label class="check"><input type="checkbox" id="lan-on"> Let phones on my Wi-Fi view cameras</label>
+      <p class="hint">Off by default: the app is only visible on this computer. Turned on,
+        anyone on your home network can reach it — so it always asks for this password first.</p>
+      <div class="fields">
+        <label>Password for phones <input type="password" id="lan-pw" placeholder="(unchanged)"></label>
+      </div>
+      <div class="row">
+        <button id="lan-save" class="primary">Save</button>
+        <span id="lan-msg" class="muted"></span>
+      </div>
+      <p class="hint">On your phone's browser, go to <strong><span id="lan-url">—</span></strong>,
+        then use “Add to Home Screen” to keep it one tap away.</p>
+    </div>
+    <h2>Common settings</h2>
+    <div id="sys-simple" class="list"></div>
+    <h2>All settings (expert)</h2>
+    <p class="hint">Every ZoneMinder option, exactly as it is stored. Changing these can stop cameras working.</p>
+    <div class="row"><input id="cfg-search" placeholder="Search settings"></div>
+    <div id="cfg-list" class="list scroll"></div>
+    <h2>Log</h2>
+    <div class="row"><button id="btn-logs">Show recent log</button></div>
+    <pre id="log-out" class="log hidden"></pre>
+    <h2>ZoneMinder itself</h2>
+    <p class="hint">The parts Porchlight doesn't wrap — the timeline, the event search grid,
+      storage areas and server groups — live in ZoneMinder's own pages. Same cameras, same
+      recordings, same database.</p>
+    <div class="row"><a id="zm-link" href="http://localhost/zm/" target="_blank" rel="noreferrer">
+      <button>Open ZoneMinder</button></a></div>
+  </section>
+</main>
+
+<div id="modal" class="modal hidden"><div class="sheet" id="modal-body"></div></div>
+<div id="viewer" class="viewer hidden"></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
