@@ -144,3 +144,7 @@ python3 e2e_drive.py       # full end-to-end run, needs a working ZoneMinder
 python3 shots.py OUTDIR    # demo data + the screenshots above (needs Xvfb)
 python3 tools/make_icon.py porchlight.png logo48.png   # redraws the app icon
 ```
+
+The camera footage in the screenshots is public-domain video from Wikimedia
+Commons: a home security camera on Prince Edward Island, a snowy bird feeder,
+a suburban driveway at night, and a US Fish & Wildlife trail camera.

@@ -2,6 +2,9 @@
 """Fill ZoneMinder with demo cameras and take the README screenshots.
 
 Runs inside the test container: python3 /src/scripts_shots.py /src/screenshots
+
+Drop real 1280x720 clips at /var/cache/zoneminder/demo/<slug>.mp4 beforehand for
+lifelike screenshots; any missing clip becomes a generated test pattern.
 """
 
 import json
@@ -13,8 +16,8 @@ import urllib.request
 
 BASE = "http://127.0.0.1:8321"
 OUT = sys.argv[1] if len(sys.argv) > 1 else "/src/screenshots"
-CAMERAS = [("Front Door", "testsrc"), ("Back Yard", "smptebars"),
-           ("Driveway", "rgbtestsrc"), ("Garage", "testsrc2")]
+CAMERAS = [("Front Door", "front-door"), ("Back Yard", "back-yard"),
+           ("Driveway", "driveway"), ("Garage", "garage")]
 
 
 def call(path, body=None):
@@ -36,10 +39,10 @@ os.makedirs(OUT, exist_ok=True)
 SETUP = len(get("cameras")) != len(CAMERAS)   # demo data survives between runs
 if SETUP:
     sh("mkdir -p /var/cache/zoneminder/demo")
-    for name, pattern in CAMERAS:
-        f = "/var/cache/zoneminder/demo/%s.mp4" % pattern
-        sh("test -f %s || ffmpeg -loglevel quiet -f lavfi -i %s=size=1280x720:rate=10 -t 30 "
-           "-pix_fmt yuv420p -y %s" % (f, pattern, f))
+    for name, clip in CAMERAS:
+        f = "/var/cache/zoneminder/demo/%s.mp4" % clip
+        sh("test -f %s || ffmpeg -loglevel quiet -f lavfi -i testsrc2=size=1280x720:rate=10 -t 30 "
+           "-pix_fmt yuv420p -y %s" % (f, f))
     sh("chown -R www-data:www-data /var/cache/zoneminder/demo")
 
     for old in get("cameras"):
@@ -47,9 +50,9 @@ if SETUP:
     for ev in get("events?limit=200")["events"]:      # recordings of long-gone cameras
         call("event/action", {"id": ev["id"], "action": "delete"})
     ids = []
-    for name, pattern in CAMERAS:
+    for name, clip in CAMERAS:
         ids.append(call("camera/add", {"name": name, "kind": "file", "width": 1280, "height": 720,
-                                       "path": "/var/cache/zoneminder/demo/%s.mp4" % pattern,
+                                       "path": "/var/cache/zoneminder/demo/%s.mp4" % clip,
                                        "function": "Mocord"})["id"])
 
     call("rule/save", {"name": "Email me at night", "cameras": ids[:2], "what": "motion",

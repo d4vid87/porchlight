@@ -700,10 +700,8 @@ async function loadRecordings(reset) {
 function recCard(e) {
   const cam = state.cameras.find((c) => String(c.id) === String(e.monitor));
   return el("div", { class: "card" },
-    // Recordings are saved as video, not stills, so the first frame of the clip
-    // itself is the thumbnail.
-    el("video", { class: "thumb", src: e.video + "#t=0.5", preload: "metadata", muted: true,
-                  onclick: () => playEvent(e) }),
+    el("img", { class: "thumb", src: e.thumb, alt: "", loading: "lazy",
+                onclick: () => playEvent(e) }),
     el("div", { class: "body" },
       el("div", { class: "title" }, (cam ? cam.name : "Camera " + e.monitor)),
       el("div", { class: "muted" }, e.start + " · " + Math.round(Number(e.length || 0)) + "s"

@@ -293,6 +293,7 @@ def h_events(q):
             "frames": ev.get("Frames"), "alarm": ev.get("AlarmFrames"),
             "cause": ev.get("Cause"), "archived": ev.get("Archived") in ("1", 1),
             "video": zmapi.video_url(ev["Id"]),
+            "thumb": zmapi.thumb_url(ev["Id"]),
             "replay": zmapi.event_replay_url(ev["Id"]),
         })
     return {"events": out, "pagination": r.get("pagination", {})}

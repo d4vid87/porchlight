@@ -155,6 +155,10 @@ def video_url(eid):
     return media_url("/index.php?view=view_video&eid=%s" % eid)
 
 
+def thumb_url(eid):
+    return media_url("/index.php?view=image&eid=%s&fid=snapshot&width=640" % eid)
+
+
 def event_replay_url(eid, scale=100):
     return media_url("/cgi-bin/nph-zms?mode=jpeg&source=event&event=%s&scale=%s&replay=single&connkey=%d"
                      % (eid, scale, connkey()))
