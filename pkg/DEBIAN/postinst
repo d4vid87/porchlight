@@ -56,6 +56,10 @@ chown -R www-data:www-data /var/cache/zoneminder 2>/dev/null || true
 chgrp -R www-data /etc/zm 2>/dev/null || true
 chmod -R g+r /etc/zm 2>/dev/null || true
 chmod g+x /etc/zm 2>/dev/null || true
+# The desktop app runs as the person who installed it, and rules, the
+# timeline and the watchdog read the database with ZoneMinder's own login.
+# Sudoers can already read it the long way round, so this adds nothing.
+setfacl -m g:sudo:r /etc/zm/zm.conf 2>/dev/null || true
 
 # The Ubuntu package ships the API without CakePHP's rewrite rules, so every
 # API URL 404s. Put them back.
