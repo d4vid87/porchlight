@@ -127,7 +127,7 @@ print("  added camera ids:", ids)
 cams = get("cameras")
 check("both cameras listed", lambda: len(cams) == 2 or bad(str(cams)))
 check("camera fields present",
-      lambda: (cams[0]["name"] == "Front" and cams[0]["stream"].startswith("http"))
+      lambda: (cams[0]["name"] == "Front" and cams[0]["stream"].startswith("/zm/"))
       or bad(str(cams[0])))
 check("status field present",
       lambda: cams[0]["status"] in ("ok", "off", "offline") or bad(str(cams[0])))
@@ -146,7 +146,8 @@ subprocess.run(["bash", "-c", "zmpkg.pl start >/dev/null 2>&1; sleep 15"], check
 
 def stream_ok(mid):
     def run():
-        data = fetch(zmapi.snapshot_url(mid, scale=50), 3000)
+        # Media URLs are app-relative; the server proxies /zm/* to ZoneMinder.
+        data = fetch(BASE + zmapi.snapshot_url(mid, scale=50), 3000)
         if b"\xff\xd8" not in data:
             bad("not a JPEG: %r" % data[:80])
     return run
@@ -166,7 +167,7 @@ def two_streams_at_once():
 
     def grab(k):
         try:
-            out[k] = fetch(zmapi.stream_url(ids[0]), 2048)
+            out[k] = fetch(BASE + zmapi.stream_url(ids[0]), 2048)
         except Exception as e:
             out[k] = e
     threads = [threading.Thread(target=grab, args=(k,)) for k in (0, 1)]
@@ -259,7 +260,21 @@ if events["events"]:
     # The player uses the mp4 and only falls back to the jpeg replay stream for
     # installs that store recordings as stills, which this one does not.
     check("recording plays back",
-          lambda: b"ftyp" in fetch(ev["video"], 4000) or bad("no mp4 came back"))
+          lambda: b"ftyp" in fetch(BASE + ev["video"], 4000) or bad("no mp4 came back"))
+
+    def range_ok():
+        """A Range request must still come back playable through the proxy.
+
+        ponytail: ZoneMinder 1.36's view_video ignores Range and sends the
+        whole file (200), which Android plays fine; iPhone Safari needs real
+        206 slices to seek -- synthesize them in proxy_media if that matters.
+        """
+        req = urllib.request.Request(BASE + ev["video"], headers={"Range": "bytes=0-99"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            if r.status not in (200, 206) or not r.read(200):
+                bad("status=%s" % r.status)
+
+    check("recording survives a Range request", range_ok)
     check("today's count feeds the tile", lambda: get("status")["today"] >= 1
           or bad(str(get("status")["today"])))
     check("last activity feeds the card",
@@ -387,6 +402,24 @@ def remote_needs_signin():
 
 
 check("phones must sign in", remote_needs_signin)
+
+
+def remote_media_needs_signin():
+    """Camera video is behind the same sign-in as the API."""
+    ip = (zmapi.lan_addresses() or ["127.0.0.1"])[0]
+    if ip == "127.0.0.1":
+        return
+    url = "http://%s:8321%s" % (ip, zmapi.snapshot_url(ids[0]))
+    try:
+        urllib.request.urlopen(url, timeout=10)
+    except urllib.error.HTTPError as e:
+        return same(e.code, 401)
+    except urllib.error.URLError:
+        return                                  # not even listening off this machine
+    bad("a camera picture was served without signing in")
+
+
+check("camera video needs sign-in too", remote_media_needs_signin)
 
 # --- cleanup -----------------------------------------------------------------
 

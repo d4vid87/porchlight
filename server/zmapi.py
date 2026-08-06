@@ -132,8 +132,12 @@ def sql(statement):
 
 
 def media_url(path_query):
-    """Absolute ZM URL for <img>/<video>, token appended when auth is on."""
-    return _with_token(ZM_WEB + path_query)
+    """App-relative ZM URL for <img>/<video>, token appended when auth is on.
+
+    The app server proxies /zm/*, so media rides the app's own origin: phones
+    on the LAN reach it, and the sign-in cookie covers camera video too.
+    """
+    return _with_token("/zm" + path_query)
 
 
 def connkey():

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -476,7 +477,9 @@ def h_ptz(body):
             "control": body["command"], "xge": "30", "yge": "30"}
     if body.get("preset"):
         args["preset"] = body["preset"]
-    url = zmapi.media_url("/index.php?" + urllib.parse.urlencode(args))
+    # Server-side fetch, so this needs ZoneMinder's real address, not the
+    # app-relative /zm/ form that media_url now returns for browsers.
+    url = zmapi._with_token(zmapi.ZM_WEB + "/index.php?" + urllib.parse.urlencode(args))
     with urllib.request.urlopen(url, timeout=10) as r:
         r.read(200)
     return {"ok": True}
@@ -620,6 +623,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "sign in first", "signin": True}, 401)
         if u.path == "/api/session" and not self.local():
             return self.send_json({"signed_in": self.allowed("/api/status")})
+        if u.path.startswith("/zm/"):
+            return self.proxy_media()
         if u.path.startswith("/api/"):
             fn = GET_ROUTES.get(u.path[5:])
             if not fn:
@@ -649,6 +654,42 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(r)
         except Exception as e:
             return self.send_json({"error": describe(e)}, 500)
+
+    def proxy_media(self):
+        """Relay one ZoneMinder media request, streamed through as it arrives.
+
+        Media URLs are app-relative (/zm/...), so the browser only ever talks
+        to this server: phones on the LAN can reach camera video, and the
+        sign-in check above covers it like everything else.
+        """
+        if ".." in self.path:
+            return self.send_json({"error": "bad path"}, 404)
+        req = urllib.request.Request(zmapi.ZM_WEB + self.path[len("/zm"):])
+        if self.headers.get("Range"):
+            req.add_header("Range", self.headers["Range"])   # mp4 seeking on phones
+        try:
+            upstream = urllib.request.urlopen(req, timeout=15)
+        except urllib.error.HTTPError as e:
+            return self.send_json({"error": "ZoneMinder said %s" % e.code}, e.code)
+        except Exception:
+            return self.send_json({"error": "ZoneMinder is not answering"}, 502)
+        with upstream:
+            # Live streams have no length, so no keep-alive on this connection.
+            self.close_connection = True
+            self.send_response(upstream.status)
+            for h in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+                if upstream.headers.get(h):
+                    self.send_header(h, upstream.headers[h])
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                while True:
+                    chunk = upstream.read1(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except OSError:
+                pass                          # viewer closed the tab mid-stream
 
     def serve_file(self, path):
         name = "index.html" if path in ("/", "") else path.lstrip("/")
