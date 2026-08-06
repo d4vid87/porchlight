@@ -144,6 +144,20 @@ assert "http://nas:8080" in sp["Filter[AutoExecuteCmd]"]
 # somebody else's command stays a plain command, not a push
 other = z.filter_to_rule({"Name": "y", "Query": "{}", "AutoExecuteCmd": "/usr/local/bin/mine"})
 assert other["push"] == "" and other["command"] == "/usr/local/bin/mine"
+assert z.push_server(sp["Filter[AutoExecuteCmd]"]) == "http://nas:8080"
+assert z.push_server("/usr/local/bin/mine") == z.NTFY_SERVER
+
+# --- weekday and tiny-blip rule terms round trip
+wd = z.rule_to_filter({"name": "Workdays", "days": "weekdays", "min_frames": 5})
+wt = json.loads(wd["Filter[Query]"])["terms"]
+assert [t["val"] for t in wt if t["attr"] == "StartWeekday"] == ["1", "5"]
+assert any(t["attr"] == "AlarmFrames" and t["val"] == "5" for t in wt)
+backd = z.filter_to_rule({"Name": "Workdays", "Query": wd["Filter[Query]"]})
+assert backd["days"] == "weekdays" and backd["min_frames"] == 5
+we = json.loads(z.rule_to_filter({"name": "Rest", "days": "weekends"})["Filter[Query]"])
+wknd = [t for t in we["terms"] if t["attr"] == "StartWeekday"]
+assert wknd[0]["obr"] == "1" and wknd[1]["cnj"] == "or" and wknd[1]["cbr"] == "1"
+assert z.filter_to_rule({"Name": "Rest", "Query": json.dumps(we)})["days"] == "weekends"
 
 # --- monitor status (the camera cards colour their badge from this)
 on = {"Id": "1", "Function": "Modect", "Enabled": "1", "Type": "Ffmpeg"}

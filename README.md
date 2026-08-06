@@ -23,18 +23,36 @@
 
 - **Private by design.** Video is recorded, stored and watched on your own computer.
   No account, no cloud, no subscription — nothing leaves your house unless you send it.
+- **Somebody at the door, not "motion detected".** A small person detector
+  (NanoDet, Apache-2.0) runs on your own CPU once per recording. A person makes the
+  alert urgent and puts them in the picture; wind and headlights don't. The headline
+  feature of every camera subscription, running at home.
 - **Works with cameras you already own.** Porchlight scans your network with ONVIF and
   fills in the technical details itself. RTSP addresses, USB webcams, MJPEG cameras and
   plain video files all work too.
 - **Phone alerts without a vendor app.** Movement rules ring your phone through the
   free, open-source [ntfy](https://ntfy.sh) app: an unguessable topic name, no account,
-  and no video in the notification. Point it at your own ntfy server if you'd rather.
+  a snapshot of the moment in the notification, and snooze buttons for noisy evenings.
+  Point it at your own ntfy server and even the snapshot never leaves home.
+- **It tells you when it's broken.** A camera that stops answering rings your phone —
+  and rings again when it's back. Old recordings make room before the disk fills.
 - **Watch from your phone.** Open the app to your home Wi-Fi — off by default, always
   password-protected — and save it to your phone's home screen like an installed app.
 - **Plain language, expert power.** Everyday tasks read like sentences; every ZoneMinder
   option stays one click away in a searchable expert table.
 - **Try it before the camera arrives.** A bundled sample video sets up a working camera
   so you can explore the whole app with nothing to plug in.
+
+## What you'd pay for elsewhere
+
+| | Ring Protect | Nest Aware | Wyze Cam Plus | Porchlight |
+|---|---|---|---|---|
+| Monthly price | $4.99+ | $8+ | $2.99/camera | $0 |
+| Snapshot in the alert | subscription | subscription | subscription | included |
+| Person detection | subscription | subscription | subscription | included, on your CPU |
+| Recording history | cloud, 180 days | cloud, 30–60 days | cloud, 14 days | your disk, your rules |
+| Works with the internet down | no | no | no | yes |
+| Footage leaves your house | always | always | always | never |
 
 ## A tour
 
@@ -60,19 +78,26 @@ through them. Click a picture to fill the screen with it.
 
 ### Recordings
 
-Filter by camera, day, motion or continuous, and kept-forever. Click to play, save the
-clip, or keep it forever.
+A 24-hour strip shows when things happened; click an hour to jump straight to it.
+Filter by camera, day, motion or continuous, and kept-forever; sort newest first or
+most movement first. Click to play, save the clip, keep it forever, or **Share** it —
+an expiring three-day link anyone can watch without your password.
 
 ![Recordings](docs/screenshots/recordings.png)
 
 ### Rules and phone alerts
 
-"When movement is recorded on the Front Door between 22:00 and 06:00, alert my phone" —
-written as a sentence, stored as a real ZoneMinder filter.
+"When movement is recorded on the Front Door between 22:00 and 06:00 on weekdays,
+alert my phone" — written as a sentence, stored as a real ZoneMinder filter. Rules can
+ignore two-frame blips, and snooze chips on the Cameras page silence every alert for
+30 minutes to 8 hours.
 
-**Phone alerts** need no account and no cloud video: install the free
-[ntfy](https://ntfy.sh) app, subscribe to the random topic on this page, and matching
-recordings ring your phone. Email settings and a test button live on the same page.
+**Phone alerts** need no account: install the free [ntfy](https://ntfy.sh) app,
+subscribe to the random topic on this page, and matching recordings ring your phone
+with a snapshot of the moment attached. A person in the picture makes the alert
+urgent; a per-camera setting can skip person-free alerts entirely. If a camera stops
+answering, your phone hears about that too. Email settings and a test button live on
+the same page.
 
 ![Rules](docs/screenshots/rules.png)
 
@@ -90,8 +115,9 @@ Turn on a password for the whole system and add viewer or manager accounts.
 
 ### System
 
-Health, storage, restart, the common settings in plain English, and every ZoneMinder
-option in a searchable expert table.
+Health, storage, restart, a one-file **backup** of cameras, rules and settings (and
+the button that restores it on a fresh install), the common settings in plain English,
+and every ZoneMinder option in a searchable expert table.
 
 **Watch from your phone** opens the app to your home network. It is off by default;
 turning it on requires a password, and every request that does not come from this
@@ -109,7 +135,7 @@ over a live snapshot for motion zones and privacy masks.
 Porchlight runs on Debian and Ubuntu.
 
 ```sh
-sudo apt install ./porchlight_2.0_all.deb
+sudo apt install ./porchlight_2.1_all.deb
 porchlight
 ```
 
@@ -124,11 +150,17 @@ screen.
 - `server/zmapi.py` — everything that talks to ZoneMinder: REST API, token auth, ONVIF
   probing, and the request builders.
 - `server/porchlight_server.py` — stdlib HTTP server, static files plus a JSON API.
+- `server/detect.py` — the person detector: NanoDet-Plus-m-416 from the
+  [OpenCV Zoo](https://github.com/opencv/opencv_zoo) (Apache-2.0) on onnxruntime's
+  CPU provider, decoding JPEGs through the ffmpeg that is already a dependency.
+  `python3-onnxruntime` is only Recommended; without it, alerts simply go out
+  unfiltered.
 - `web/` — vanilla HTML, CSS and JavaScript. No build step, no dependencies.
 - `admin/porchlight-admin` — the only privileged code, reached through polkit with a
   fixed list of subcommands.
-- `push.sh` — three lines of curl behind the phone alerts; ZoneMinder filters run it
-  per event, with the topic in the command itself.
+- `push.sh` — ZoneMinder filters run it per event; it hands the event to the local
+  server, which applies cooldown, snooze and the person check before posting to ntfy.
+  If the server isn't running it still sends a bare alert by itself.
 
 Filters and users are written straight to ZoneMinder's own database: the 1.36 API has
 no filters endpoint and refuses user writes. The timeline, event search grid, storage
@@ -138,7 +170,7 @@ recordings, same database, linked from the System page.
 ### Development
 
 ```sh
-./build.sh                 # builds porchlight_2.0_all.deb
+./build.sh                 # builds porchlight_2.1_all.deb
 python3 test_api.py        # pure-logic checks, prints "ok"
 python3 e2e_drive.py       # full end-to-end run, needs a working ZoneMinder
 python3 shots.py OUTDIR    # demo data + the screenshots above (needs Xvfb)

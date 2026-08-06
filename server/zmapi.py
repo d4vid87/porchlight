@@ -591,6 +591,12 @@ def push_topic(command):
     return ""
 
 
+def push_server(command):
+    """The ntfy server the same command posts to."""
+    parts = shlex.split(command or "")
+    return parts[2] if push_topic(command) and len(parts) > 2 else NTFY_SERVER
+
+
 # --- rules (ZM filters) -------------------------------------------------------
 
 def rule_to_filter(rule):
@@ -622,9 +628,20 @@ def rule_to_filter(rule):
         terms.append(joined({"attr": "Cause", "op": "=", "val": "Motion"}))
     between = rule.get("between")
     if between:
-        # ponytail: time of day only; day-of-week filtering differs across ZM versions.
         terms.append(joined({"attr": "StartTime", "op": ">=", "val": between[0] + ":00"}))
         terms.append(joined({"attr": "StartTime", "op": "<=", "val": between[1] + ":59"}))
+    if rule.get("days") == "weekdays":       # StartWeekday counts Sunday as 0
+        terms.append(joined({"attr": "StartWeekday", "op": ">=", "val": "1"}))
+        terms.append(joined({"attr": "StartWeekday", "op": "<=", "val": "5"}))
+    elif rule.get("days") == "weekends":
+        t = joined({"attr": "StartWeekday", "op": "=", "val": "0"})
+        t["obr"] = "1"
+        terms.append(t)
+        terms.append({"cnj": "or", "attr": "StartWeekday", "op": "=", "val": "6", "cbr": "1"})
+    if rule.get("min_frames"):
+        # Wind gusts and headlights make one-or-two-frame events; skip them.
+        terms.append(joined({"attr": "AlarmFrames", "op": ">=",
+                             "val": str(int(rule["min_frames"]))}))
     days = rule.get("delete_after_days")
     if days:
         terms.append(joined({"attr": "StartDateTime", "op": "<", "val": "-%d day" % int(days)}))
@@ -661,10 +678,21 @@ def filter_to_rule(row):
         "keep": row.get("AutoArchive") in ("1", 1),
         "delete": row.get("AutoDelete") in ("1", 1),
         "push": push_topic(row.get("AutoExecuteCmd")),
+        "push_server": push_server(row.get("AutoExecuteCmd")),
         "command": "" if push_topic(row.get("AutoExecuteCmd")) else (row.get("AutoExecuteCmd") or ""),
         "between": _between(terms),
+        "days": _days(terms),
+        "min_frames": next((int(t["val"]) for t in terms
+                            if t.get("attr") == "AlarmFrames"), None),
         "delete_after_days": _age_days(terms),
     }
+
+
+def _days(terms):
+    wd = [str(t.get("val")) for t in terms if t.get("attr") == "StartWeekday"]
+    if not wd:
+        return None
+    return "weekends" if "0" in wd or "6" in wd else "weekdays"
 
 
 def _between(terms):

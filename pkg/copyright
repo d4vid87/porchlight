@@ -1,0 +1,8 @@
+Porchlight itself ships without a license; see the README in the source
+repository.
+
+The bundled person-detection model
+(/usr/share/porchlight/models/nanodet-plus-m-416.onnx) is NanoDet-Plus-m-416
+from the OpenCV Zoo (https://github.com/opencv/opencv_zoo), licensed under
+the Apache License 2.0. The full license text is installed alongside this
+file as NANODET-LICENSE.

@@ -57,6 +57,8 @@ if SETUP:
 
     call("rule/save", {"name": "Email me at night", "cameras": ids[:2], "what": "motion",
                        "between": ["22:00", "06:00"], "email": True})
+    call("rule/save", {"name": "Alert my phone", "cameras": ids, "what": "motion",
+                       "days": "weekdays", "min_frames": 3, "push": "porch-k2m9x4q1w7"})
     call("rule/save", {"name": "Keep the driveway for a month", "cameras": [ids[2]],
                        "delete_after_days": 30})
     call("state/save", {"name": "Away", "rows": [{"id": i, "function": "Modect", "enabled": True}

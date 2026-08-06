@@ -5,18 +5,25 @@ Listens on 127.0.0.1 only. Run directly, or via the `porchlight` launcher.
 """
 
 import hashlib
+import hmac
+import io
 import json
 import os
+import re
 import secrets
+import tarfile
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import detect
 import zmapi
 
 PORT = int(os.environ.get("PORCHLIGHT_PORT", "8321"))
@@ -73,7 +80,8 @@ def zones_of(mid):
 # --- endpoint handlers: each returns a JSON-able object ------------------------
 
 def h_status(_):
-    out = {"cameras": [], "storage": {}}
+    out = {"cameras": [], "storage": {},
+           "snooze_until": load_config().get("snooze_until", 0)}
     try:
         v = zmapi.api("host/getVersion.json")
         out["ok"] = True
@@ -156,6 +164,8 @@ def h_camera(q):
     mid = q["id"]
     m = zmapi.api("monitors/%s.json" % mid)["monitor"]["Monitor"]
     return {"monitor": m, "zones": zones_of(mid),
+            "smart": detect.available(),
+            "people_only": str(mid) in (load_config().get("people_only") or []),
             "stream": zmapi.stream_url(mid, scale=60, maxfps=10)}
 
 
@@ -303,8 +313,9 @@ def h_events(q):
     path = "events"
     if parts:
         path += "/index/" + "/".join(parts)
-    path += ".json?sort=StartTime&direction=desc&limit=%s&page=%s" % (
-        q.get("limit", "60"), q.get("page", "1"))
+    sort = "MaxScore" if q.get("sort") == "score" else "StartTime"
+    path += ".json?sort=%s&direction=desc&limit=%s&page=%s" % (
+        sort, q.get("limit", "60"), q.get("page", "1"))
     r = zmapi.api(path)
     out = []
     for e in r.get("events", []):
@@ -313,6 +324,7 @@ def h_events(q):
             "id": ev["Id"], "monitor": ev.get("MonitorId"), "name": ev.get("Name"),
             "start": ev.get("StartTime"), "length": ev.get("Length"),
             "frames": ev.get("Frames"), "alarm": ev.get("AlarmFrames"),
+            "score": ev.get("MaxScore"),
             "cause": ev.get("Cause"), "archived": ev.get("Archived") in ("1", 1),
             "video": zmapi.video_url(ev["Id"]),
             "thumb": zmapi.thumb_url(ev["Id"]),
@@ -506,6 +518,357 @@ def h_test_push(body):
     return {"ok": p.returncode == 0, "out": (p.stdout + p.stderr)[-500:]}
 
 
+# --- phone alerts ------------------------------------------------------------
+# ZoneMinder filters run push.sh per event; it hands the event here so the
+# decisions (cooldown, snooze, snapshot, priority) live in one place.
+
+_push_last = {}          # monitor id -> epoch of the last alert sent for it
+
+
+def snapshot_jpeg(eid):
+    """The event's best frame as JPEG bytes, or None.
+
+    Fetched from ZoneMinder over HTTP rather than read from the event
+    directory: ZM builds snapshot.jpg from the mp4 on first request, so this
+    works whether or not the file exists yet. A still-open event may not
+    answer right away, hence the retries.
+    """
+    url = zmapi._with_token("%s/index.php?view=image&eid=%s&fid=snapshot&width=1280"
+                            % (zmapi.ZM_WEB, eid))
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                data = r.read()
+            if data[:2] == b"\xff\xd8":
+                return data
+        except Exception:
+            pass
+        time.sleep(2)
+    return None
+
+
+def send_ntfy(server, topic, title, message, priority, jpeg=None, click=""):
+    """Deliver one ntfy notification, snapshot attached when there is one.
+
+    Text rides in query parameters (ntfy accepts them UTF-8 percent-encoded,
+    where headers would choke on non-ASCII), leaving the body free for the
+    attachment.
+    """
+    q = {"title": title, "priority": str(priority)}
+    if click:
+        q["click"] = click
+    if jpeg:
+        q["message"] = message
+        q["filename"] = "snapshot.jpg"
+    url = "%s/%s?%s" % (server.rstrip("/"), topic, urllib.parse.urlencode(q))
+    req = urllib.request.Request(url, data=jpeg if jpeg else message.encode(),
+                                 method="PUT" if jpeg else "POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read(200)
+        return True
+    except Exception:
+        return False
+
+
+def event_dir_ids(path):
+    """(monitor id, event id) out of ZM's events/<mid>/<date>/<eid> layout."""
+    parts = (path or "").strip("/").split("/")
+    if "events" not in parts:
+        return None, None
+    rest = parts[parts.index("events") + 1:]
+    mid = rest[0] if rest and rest[0].isdigit() else None
+    eid = rest[-1] if len(rest) >= 2 and rest[-1].isdigit() else None
+    return mid, eid
+
+
+def h_push(body):
+    """One alert, decided here. Loopback only; phones never reach this."""
+    topic = re.sub(r"[^A-Za-z0-9_-]", "_", body.get("topic") or "")
+    if not topic:
+        return {"ok": False, "error": "no topic"}
+    server = body.get("server") or zmapi.NTFY_SERVER
+    now = time.time()
+    cfg = load_config()
+    if now < cfg.get("snooze_until", 0):
+        return {"ok": True, "skipped": "snoozed"}
+    mid, eid = event_dir_ids(body.get("dir"))
+    if mid and now - _push_last.get(mid, 0) < 60:
+        return {"ok": True, "skipped": "cooldown"}
+
+    title, message, priority, jpeg = "Camera alert", body.get("message") or "", 3, None
+    when = time.strftime("%H:%M")
+    if eid:
+        try:
+            ev = zmapi.api("events/%s.json" % eid)["event"]["Event"]
+            names = {str(m["Id"]): m.get("Name") for m in monitors()}
+            title = names.get(str(ev.get("MonitorId")), title)
+            when = (ev.get("StartTime") or "")[11:16] or when
+            message = "%s at %s" % (ev.get("Cause") or "Movement", when)
+            if float(ev.get("MaxScore") or 0) >= 50:
+                priority = 4
+        except Exception:
+            pass
+        jpeg = snapshot_jpeg(eid)
+
+    # No snapshot means nobody can tell who is there: alert anyway (fail open)
+    # rather than let a broken snapshot pipeline silence the phone.
+    if jpeg and detect.available():
+        conf, box = detect.person(jpeg)
+        if conf:
+            priority = 5
+            message = "Somebody seen at %s" % when
+            if box and body.get("dir") and os.path.isdir(body["dir"]):
+                try:
+                    # ZoneMinder's event pages pick this file up by name.
+                    detect.draw_box(jpeg, box, os.path.join(body["dir"], "objdetect.jpg"))
+                except Exception:
+                    pass                      # event dirs belong to www-data
+        elif mid and mid in (cfg.get("people_only") or []):
+            return {"ok": True, "skipped": "no person"}
+
+    click = lan_url() + "/#recordings" if cfg.get("lan") else ""
+    ok = send_ntfy(server, topic, title, message or "Something moved",
+                   priority, jpeg, click)
+    if ok and mid:
+        _push_last[mid] = now
+    return {"ok": ok}
+
+
+def h_snooze(body):
+    """Silence phone alerts for a while. minutes=0 turns them back on."""
+    minutes = int(body.get("minutes") or 0)
+    cfg = load_config()
+    cfg["snooze_until"] = now = time.time() + minutes * 60 if minutes else 0
+    save_config(cfg)
+    return {"ok": True, "until": now}
+
+
+def snoozed():
+    return time.time() < load_config().get("snooze_until", 0)
+
+
+def h_people_only(body):
+    """Per-camera 'alert only when somebody is seen' toggle."""
+    cfg = load_config()
+    only = set(cfg.get("people_only") or [])
+    (only.add if body.get("on") else only.discard)(str(body["id"]))
+    cfg["people_only"] = sorted(only)
+    save_config(cfg)
+    return {"ok": True}
+
+
+# --- share links --------------------------------------------------------------
+# One recording, one signed link, three days. Nothing stored per link: the
+# token carries the event id and expiry, signed with a local secret.
+
+def share_secret():
+    cfg = load_config()
+    if not cfg.get("share_secret"):
+        cfg["share_secret"] = secrets.token_hex(16)
+        save_config(cfg)
+    return cfg["share_secret"]
+
+
+def share_eid(token):
+    """The event id a valid, unexpired share token names, else None."""
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[1].isdigit() or time.time() > int(parts[1]):
+        return None
+    secret = load_config().get("share_secret") or ""
+    want = hmac.new(secret.encode(), ("%s.%s" % (parts[0], parts[1])).encode(),
+                    "sha256").hexdigest()
+    return parts[0] if secret and hmac.compare_digest(want, parts[2]) else None
+
+
+def share_ok(full_path):
+    """May this request pass without the sign-in cookie on a share token?"""
+    u = urllib.parse.urlparse(full_path)
+    if u.path.startswith("/share/"):
+        return share_eid(u.path[len("/share/"):]) is not None
+    if u.path.startswith("/zm/"):
+        q = urllib.parse.parse_qs(u.query)
+        eid = share_eid((q.get("share") or [""])[0])
+        return eid is not None and (q.get("eid") or [""])[0] == eid
+    return False
+
+
+def h_share(body):
+    """A link that shows one recording to somebody without the password."""
+    if not load_config().get("lan"):
+        return {"ok": False, "error": "Turn on “Watch from your phone” "
+                                      "first: share links use your network address."}
+    eid = str(int(body["id"]))
+    expiry = str(int(time.time()) + 3 * 86400)
+    sig = hmac.new(share_secret().encode(), ("%s.%s" % (eid, expiry)).encode(),
+                   "sha256").hexdigest()
+    return {"ok": True, "url": "%s/share/%s.%s.%s" % (lan_url(), eid, expiry, sig)}
+
+
+# --- backup and restore -------------------------------------------------------
+
+# Monitor columns worth carrying to a new install; ids and runtime state stay.
+RESTORE_COLUMNS = [
+    "Name", "Type", "Function", "Enabled", "Path", "Method", "Width", "Height",
+    "Colours", "SaveJPEGs", "VideoWriter", "RecordAudio", "Device", "Channel",
+    "Format", "Palette", "Protocol", "Host", "Port", "User", "Pass", "MaxFPS",
+    "AlarmMaxFPS", "AnalysisFPS", "AlarmFrameCount", "PreEventCount",
+    "PostEventCount", "SectionLength", "EventPrefix", "Controllable",
+    "ControlId", "ControlDevice", "ControlAddress",
+]
+
+
+def backup_tar():
+    """Cameras, rules and app settings as one tar.gz."""
+    payload = {
+        "config.json": json.dumps(load_config()),
+        "monitors.json": json.dumps(monitors()),
+        "rules.json": json.dumps(h_rules(None)),
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, text in payload.items():
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def restore_tar(blob):
+    """Recreate missing cameras and rules from a backup. Existing rows stay."""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+            files = {m.name: tar.extractfile(m).read().decode()
+                     for m in tar.getmembers()}
+    except Exception:
+        return {"ok": False, "error": "That does not look like a Porchlight backup."}
+    added = 0
+    have = {m.get("Name") for m in monitors()}
+    saved = json.loads(files.get("monitors.json") or "[]")
+    for m in saved:
+        if m.get("Name") in have:
+            continue
+        fields = {"Monitor[%s]" % k: str(m[k]) for k in RESTORE_COLUMNS
+                  if m.get(k) is not None}
+        try:
+            zmapi.api("monitors.json", data=fields)
+            added += 1
+        except Exception:
+            pass
+    # Rules point at monitor ids, which a fresh install hands out anew.
+    name_to_id = {m.get("Name"): str(m["Id"]) for m in monitors()}
+    idmap = {str(m["Id"]): name_to_id.get(m.get("Name")) for m in saved}
+    have_rules = {r["name"] for r in h_rules(None)}
+    for r in json.loads(files.get("rules.json") or "[]"):
+        if r.get("name") in have_rules:
+            continue
+        r.pop("id", None)
+        r["cameras"] = [idmap.get(str(c)) or c for c in (r.get("cameras") or [])]
+        try:
+            h_rule_save(r)
+            added += 1
+        except Exception:
+            pass
+    cfg = json.loads(files.get("config.json") or "{}")
+    if cfg:
+        keep = load_config()
+        keep.update({k: v for k, v in cfg.items() if k != "lan"})  # rebinding is a choice
+        save_config(keep)
+    return {"ok": True, "added": added}
+
+
+# --- watchdog ----------------------------------------------------------------
+# ZoneMinder never says a word when a camera dies or the disk fills up; this
+# thread does.
+
+WATCHDOG_INTERVAL = int(os.environ.get("PORCHLIGHT_WATCHDOG", "60"))
+
+
+def push_targets():
+    """Every distinct (topic, server) the rules alert a phone on."""
+    out = []
+    try:
+        for row in zmapi.sql("SELECT `AutoExecuteCmd` FROM Filters WHERE `AutoExecute`='1'"):
+            t = zmapi.push_topic(row[0])
+            if t and (t, zmapi.push_server(row[0])) not in out:
+                out.append((t, zmapi.push_server(row[0])))
+    except Exception:
+        pass
+    return out
+
+
+def ensure_disk_guard():
+    """A full disk silently stops recording. ZoneMinder ships a PurgeWhenFull
+    filter for exactly this, but not every install has it running."""
+    try:
+        rows = zmapi.sql("SELECT Id, Background FROM Filters WHERE Name='PurgeWhenFull'")
+        if rows:
+            if rows[0][1] != "1":
+                zmapi.sql("UPDATE Filters SET `Background`='1' WHERE Id=%s"
+                          % zmapi.quote(rows[0][0]))
+            return
+        query = {"terms": [{"attr": "DiskPercent", "op": ">=", "val": "95"},
+                           {"cnj": "and", "attr": "Archived", "op": "=", "val": "0"}],
+                 "sort_field": "Id", "sort_asc": "1", "limit": "50"}
+        zmapi.sql("INSERT INTO Filters SET " + sql_sets({
+            "Name": "PurgeWhenFull", "Query_json": json.dumps(query),
+            "AutoDelete": "1", "Background": "1", "AutoEmail": "0",
+            "AutoArchive": "0", "AutoExecute": "0", "AutoExecuteCmd": "",
+            "EmailTo": ""}))
+    except Exception:
+        pass
+
+
+def watchdog():
+    """Cameras that should be capturing but aren't get one phone alert after
+    two consecutive misses, and one more when they come back."""
+    ensure_disk_guard()
+    down, told = {}, set()
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+        try:
+            rows = zmapi.api("monitors.json").get("monitors", [])
+        except Exception:
+            continue
+        targets = push_targets()
+        for row in rows:
+            m = row["Monitor"]
+            mid = str(m["Id"])
+            status = zmapi.monitor_status(m, row.get("Monitor_Status") or {})
+            if status == "offline":
+                down[mid] = down.get(mid, 0) + 1
+                if down[mid] == 2 and mid not in told:
+                    told.add(mid)
+                    if not snoozed():
+                        for topic, server in targets:
+                            send_ntfy(server, topic, m.get("Name") or "Camera",
+                                      "This camera stopped responding.", 4)
+            else:
+                down[mid] = 0
+                if mid in told:
+                    told.discard(mid)
+                    if status == "ok" and not snoozed():
+                        for topic, server in targets:
+                            send_ntfy(server, topic, m.get("Name") or "Camera",
+                                      "Back online.", 3)
+
+
+def h_timeline(q):
+    """Recordings per hour of one day, for the heat strip above the list."""
+    day = q.get("day") or time.strftime("%Y-%m-%d")
+    where = ["StartDateTime >= %s" % zmapi.quote(day + " 00:00:00"),
+             "StartDateTime <= %s" % zmapi.quote(day + " 23:59:59")]
+    if q.get("camera"):
+        where.append("MonitorId = %s" % zmapi.quote(q["camera"]))
+    hours = [0] * 24
+    for row in zmapi.sql("SELECT HOUR(StartDateTime), COUNT(*) FROM Events "
+                         "WHERE %s GROUP BY 1" % " AND ".join(where)):
+        hours[int(row[0])] = int(row[1])
+    return {"hours": hours}
+
+
 # --- viewing from a phone -----------------------------------------------------
 
 def lan_url():
@@ -558,7 +921,7 @@ GET_ROUTES = {
     "status": h_status, "cameras": h_cameras, "camera": h_camera, "events": h_events,
     "rules": h_rules, "configs": h_configs, "states": h_states, "users": h_users,
     "scan": h_scan_result, "webcams": h_webcams, "logs": h_logs,
-    "access": h_access, "session": h_session,
+    "access": h_access, "session": h_session, "timeline": h_timeline,
     "modes": lambda q: [{"value": v, "label": l} for v, l in zmapi.MODES],
     "zonetypes": lambda q: [{"value": v, "label": l} for v, l in zmapi.ZONE_TYPES],
     "zonefields": lambda q: [{"name": n, "label": l, "options": o}
@@ -576,6 +939,8 @@ POST_ROUTES = {
     "login": h_login, "zone/save": h_zone_save, "zone/delete": h_zone_delete,
     "ptz": h_ptz, "restart": h_restart, "test-email": h_test_email,
     "test-push": h_test_push, "access/save": h_access_save, "signin": h_signin,
+    "push": h_push, "snooze": h_snooze, "camera/people-only": h_people_only,
+    "share": h_share,
 }
 
 # What a phone may touch before it has signed in: the app shell and the sign-in
@@ -609,6 +974,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path in PUBLIC_FILES or path in ("/api/signin", "/api/session"):
             return True
+        if share_ok(self.path):
+            return True
         cookie = self.headers.get("Cookie") or ""
         for part in cookie.split(";"):
             k, _, v = part.strip().partition("=")
@@ -625,6 +992,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"signed_in": self.allowed("/api/status")})
         if u.path.startswith("/zm/"):
             return self.proxy_media()
+        if u.path.startswith("/share/"):
+            return self.share_page(u.path[len("/share/"):])
+        if u.path == "/api/backup":
+            return self.send_backup()
         if u.path.startswith("/api/"):
             fn = GET_ROUTES.get(u.path[5:])
             if not fn:
@@ -639,12 +1010,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.allowed(self.path):
             return self.send_json({"error": "sign in first", "signin": True}, 401)
+        if self.path == "/api/push" and not self.local():
+            # Only ZoneMinder's own filters (via push.sh) may raise alerts.
+            return self.send_json({"error": "no such endpoint"}, 404)
+        if self.path == "/api/restore":
+            # The body is a tar.gz, not JSON; hand it over before decoding.
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                return self.send_json(restore_tar(self.rfile.read(n)))
+            except Exception as e:
+                return self.send_json({"error": describe(e)}, 500)
         fn = POST_ROUTES.get(self.path[5:]) if self.path.startswith("/api/") else None
         if not fn:
             return self.send_json({"error": "no such endpoint"}, 404)
-        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
         try:
-            body = json.loads(self.rfile.read(n).decode() or "{}")
+            if raw.lstrip().startswith("{") or not raw:
+                body = json.loads(raw or "{}")
+            else:
+                # push.sh posts curl form fields; everything else sends JSON.
+                body = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
         except ValueError:
             return self.send_json({"error": "bad request body"}, 400)
         try:
@@ -691,6 +1076,36 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass                          # viewer closed the tab mid-stream
 
+    def share_page(self, token):
+        """A bare player page for one shared recording."""
+        eid = share_eid(token)
+        if not eid:
+            return self.send_json({"error": "This link has expired."}, 404)
+        video = zmapi.media_url("/index.php?view=view_video&eid=%s" % eid) \
+            + "&share=" + token
+        page = ("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+                "<title>Shared recording</title></head>"
+                "<body style=\"margin:0;background:#000\">"
+                "<video src=\"%s\" controls autoplay playsinline "
+                "style=\"width:100%%;height:100vh\"></video></body></html>" % video)
+        data = page.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_backup(self):
+        data = backup_tar()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/gzip")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="porchlight-backup.tar.gz"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def serve_file(self, path):
         name = "index.html" if path in ("/", "") else path.lstrip("/")
         full = os.path.normpath(os.path.join(WEB_DIR, name))
@@ -721,6 +1136,7 @@ def describe(e):
 def main():
     host = "0.0.0.0" if load_config().get("lan") else "127.0.0.1"
     srv = ThreadingHTTPServer((host, PORT), Handler)
+    threading.Thread(target=watchdog, daemon=True).start()
     print("Porchlight on http://%s:%d" % (host, PORT), flush=True)
     srv.serve_forever()
 

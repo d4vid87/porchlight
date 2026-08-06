@@ -1,20 +1,34 @@
 #!/bin/sh
-# Send a phone alert. Called by ZoneMinder filters:
-#   push.sh TOPIC SERVER [title] [message...]
-# ZoneMinder appends the event details it knows about, which become the message.
+# Hand a camera alert to the Porchlight server, which decides whether and how
+# to send it (cooldown, snooze, snapshot attached). Called by ZoneMinder
+# filters as:
+#   push.sh TOPIC SERVER [words...]
+# ZoneMinder appends the event's directory as the last argument; test alerts
+# pass plain words instead, which become the message.
 set -e
-
-# ntfy topics are part of a URL, so anything odd becomes an underscore.
-TOPIC=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_')
+[ -n "$1" ] || { echo "no topic given" >&2; exit 1; }
+TOPIC="$1"
 SERVER="${2:-https://ntfy.sh}"
-TITLE="${3:-Camera alert}"
-[ -n "$TOPIC" ] || { echo "no topic given" >&2; exit 1; }
+shift
+[ "$#" -gt 0 ] && shift
 
-MESSAGE=""
-if [ "$#" -gt 3 ]; then
-    shift 3
-    MESSAGE="$*"
+DIR=""
+MSG=""
+for a in "$@"; do
+    if [ -d "$a" ]; then DIR="$a"; else MSG="$MSG $a"; fi
+done
+
+if curl -fsS -m 40 \
+    --data-urlencode "topic=$TOPIC" \
+    --data-urlencode "server=$SERVER" \
+    --data-urlencode "message=${MSG# }" \
+    --data-urlencode "dir=$DIR" \
+    "http://127.0.0.1:${PORCHLIGHT_PORT:-8321}/api/push" -o /dev/null; then
+    exit 0
 fi
-[ -n "$MESSAGE" ] || MESSAGE="Something moved at $(date '+%H:%M')"
 
-exec curl -fsS -m 20 -H "Title: $TITLE" -d "$MESSAGE" "$SERVER/$TOPIC" -o /dev/null
+# The server is not running (machine rebooted, app never opened): send a plain
+# alert straight to ntfy so no event goes unannounced.
+TOPIC=$(printf '%s' "$TOPIC" | tr -c 'A-Za-z0-9_-' '_')
+exec curl -fsS -m 20 -H "Title: Camera alert" \
+    -d "Something moved at $(date '+%H:%M')" "$SERVER/$TOPIC" -o /dev/null

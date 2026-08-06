@@ -31,6 +31,7 @@
   <section id="page-cameras" class="page">
     <header><h1>Cameras</h1><div class="row"><button id="btn-live">Start live views</button><button class="primary" id="btn-add">Add a camera</button></div></header>
     <div id="tiles" class="tiles"></div>
+    <div id="snooze-bar" class="row hidden"></div>
     <div id="camera-grid" class="grid"></div>
   </section>
 
@@ -72,9 +73,16 @@
             <option value="Motion">Movement only</option>
           </select>
         </label>
+        <label>Order
+          <select id="rec-sort">
+            <option value="">Newest first</option>
+            <option value="score">Most movement first</option>
+          </select>
+        </label>
         <label class="check"><input type="checkbox" id="rec-kept"> Kept forever only</label>
       </div>
     </header>
+    <div id="rec-timeline" class="timeline"></div>
     <div id="rec-grid" class="grid"></div>
     <div class="center"><button id="rec-more" class="hidden">Show more</button></div>
   </section>
@@ -97,9 +105,9 @@
         <button id="push-test">Send a test alert</button>
         <span id="push-msg" class="muted"></span>
       </div>
-      <p class="hint">The topic is an unguessable name on the public ntfy.sh server; no
-        account, no video leaves this computer. Run your own ntfy and put its address in
-        “Alert service” if you'd rather.</p>
+      <p class="hint">The topic is an unguessable name on the public ntfy.sh server — no
+        account needed. Alerts carry one snapshot of the moment; run your own ntfy and put
+        its address in “Alert service” to keep even that inside your house.</p>
     </div>
     <h2>Email</h2>
     <div class="card pad">
@@ -163,6 +171,17 @@
       </div>
       <p class="hint">On your phone's browser, go to <strong><span id="lan-url">—</span></strong>,
         then use “Add to Home Screen” to keep it one tap away.</p>
+    </div>
+    <h2>Backup</h2>
+    <div class="card pad">
+      <p class="hint">Everything Porchlight knows — cameras, rules, settings — in one small
+        file. Keep it somewhere safe; restoring it on a fresh install brings your setup back.</p>
+      <div class="row">
+        <a href="/api/backup" download><button>Download backup</button></a>
+        <button id="restore-btn">Restore from a backup</button>
+        <input type="file" id="restore-file" accept=".gz,.tgz,application/gzip" class="hidden">
+        <span id="restore-msg" class="muted"></span>
+      </div>
     </div>
     <h2>Common settings</h2>
     <div id="sys-simple" class="list"></div>

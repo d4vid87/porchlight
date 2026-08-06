@@ -1,9 +1,10 @@
 Package: porchlight
-Version: 2.0
+Version: 2.1
 Section: video
 Priority: optional
 Architecture: all
 Depends: zoneminder, default-mysql-server, python3, pkexec, xdg-utils, curl, ffmpeg
+Recommends: python3-onnxruntime
 Maintainer: Porchlight <porchlight@localhost>
 Description: Porchlight - simple security camera setup
  A plain-language app for adding IP cameras to ZoneMinder. Finds cameras on

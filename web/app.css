@@ -217,3 +217,11 @@ details summary { cursor: pointer; color: var(--accent); margin: 10px 0; }
   .sheet { width: 100%; max-width: none; border-radius: 0; padding: 16px; }
   .toast { max-width: 92vw; }
 }
+
+/* Hour-by-hour heat strip on the recordings page. */
+.timeline { display: flex; gap: 2px; margin: 0 0 14px; }
+.timeline .cell { flex: 1; height: 18px; min-width: 0; border-radius: 3px;
+  background: var(--accent); cursor: pointer; }
+.timeline .cell.sel { outline: 2px solid var(--accent); outline-offset: 1px; opacity: 1 !important; }
+
+#snooze-bar { margin: 0 0 14px; }

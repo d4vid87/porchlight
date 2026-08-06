@@ -8,10 +8,12 @@ it back, edit a zone, save a rule, switch run states, add a person.
     python3 /src/e2e_drive.py
 """
 
+import http.server
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +22,8 @@ import urllib.request
 BASE = "http://127.0.0.1:8321"
 SRC = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SRC, "server"))
+# The deb installs the model under /usr/share; tests run from the checkout.
+os.environ["PORCHLIGHT_MODEL"] = os.path.join(SRC, "models", "nanodet-plus-m-416.onnx")
 import zmapi  # noqa: E402  (needs the sys.path line above)
 
 failures = []
@@ -74,10 +78,11 @@ def check(name, fn):
 log = open("/tmp/porchlight-server.log", "wb")
 
 
-def start_server():
+def start_server(extra_env=None):
+    env = dict(os.environ, PORCHLIGHT_WEBDIR=os.path.join(SRC, "web"))
+    env.update(extra_env or {})
     s = subprocess.Popen([sys.executable, os.path.join(SRC, "server", "porchlight_server.py")],
-                         env=dict(os.environ, PORCHLIGHT_WEBDIR=os.path.join(SRC, "web")),
-                         stdout=log, stderr=log)
+                         env=env, stdout=log, stderr=log)
     for _ in range(60):
         try:
             urllib.request.urlopen(BASE + "/api/status", timeout=5)
@@ -250,13 +255,25 @@ check("sensitivity preset applies",
 
 # --- recordings --------------------------------------------------------------
 
+def force_event(mid, tries=3):
+    """A closed event with frames, or None. zmu -a can race zmc's clip-loop
+    respawn and leave a frameless event; force again when that happens."""
+    for _ in range(tries):
+        before = [e["id"] for e in get("events", {"limit": 3})["events"]]
+        subprocess.run(["bash", "-c", "zmu -m %s -a >/dev/null 2>&1; sleep 8; "
+                                      "zmu -m %s -c >/dev/null 2>&1" % (mid, mid)], check=False)
+        for _ in range(10):
+            time.sleep(2)
+            evs = get("events", {"limit": 1})["events"]
+            if evs and evs[0]["id"] not in before and int(evs[0].get("frames") or 0) > 0:
+                return evs[0]
+    return None
+
+
 print("recordings")
-subprocess.run(["bash", "-c", "zmu -m %s -a >/dev/null 2>&1; sleep 8; "
-                              "zmu -m %s -c >/dev/null 2>&1; sleep 8" % (ids[0], ids[0])], check=False)
-events = get("events", {"limit": 10})
-check("an event was recorded", lambda: events["events"] or bad("nothing recorded"))
-if events["events"]:
-    ev = events["events"][0]
+ev = force_event(ids[0])
+check("an event was recorded", lambda: ev or bad("nothing recorded"))
+if ev:
     # The player uses the mp4 and only falls back to the jpeg replay stream for
     # installs that store recordings as stills, which this one does not.
     check("recording plays back",
@@ -317,6 +334,251 @@ def push_rule():
 
 check("phone alert reads back", push_rule)
 check("phone alert rule deletes", lambda: call("rule/delete", {"id": push_rule()["id"]})["ok"])
+
+check("weekday + blip rule saves", lambda: call("rule/save", {
+    "name": "E2E days", "what": "motion", "days": "weekdays", "min_frames": 5})["ok"])
+
+
+def days_rule():
+    mine = [r for r in get("rules") if r["name"] == "E2E days"][0]
+    if mine["days"] != "weekdays" or mine["min_frames"] != 5:
+        bad(str(mine))
+    call("rule/save", {"id": mine["id"], "name": "E2E days", "what": "motion",
+                       "days": "weekends"})
+    mine = [r for r in get("rules") if r["name"] == "E2E days"][0]
+    if mine["days"] != "weekends":
+        bad(str(mine))
+    call("rule/delete", {"id": mine["id"]})
+
+
+check("weekday rule round trips", days_rule)
+
+# --- phone alerts through the server -----------------------------------------
+# push.sh hands events to /api/push, which decides (cooldown, snooze, snapshot)
+# and posts to ntfy. A local capture server stands in for ntfy.sh.
+
+print("phone alerts")
+NTFY = "http://127.0.0.1:8399"
+ntfy_hits = []
+
+
+class FakeNtfy(http.server.BaseHTTPRequestHandler):
+    def _grab(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        ntfy_hits.append({"method": self.command, "path": self.path,
+                          "body": self.rfile.read(n)})
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    do_POST = do_PUT = _grab
+
+    def log_message(self, *a):
+        pass
+
+
+threading.Thread(target=http.server.ThreadingHTTPServer(
+    ("127.0.0.1", 8399), FakeNtfy).serve_forever, daemon=True).start()
+
+
+def push_form(fields):
+    """POST the way push.sh does: curl form fields, not JSON."""
+    req = urllib.request.Request(BASE + "/api/push",
+                                 data=urllib.parse.urlencode(fields).encode())
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read().decode())
+
+
+# The recordings section deleted its event, so force a fresh one to alert on.
+push_ev = force_event(ids[0])
+push_dir = "/var/cache/zoneminder/events/%s/2026-01-01/%s" % (
+    push_ev["monitor"], push_ev["id"]) if push_ev else ""
+
+
+def snapshot_push():
+    r = push_form({"topic": "e2e-push", "server": NTFY, "dir": push_dir})
+    if not r.get("ok") or r.get("skipped"):
+        bad(str(r))
+    hit = ntfy_hits[-1]
+    if hit["method"] != "PUT" or not hit["body"].startswith(b"\xff\xd8"):
+        bad("method=%s body=%r" % (hit["method"], hit["body"][:20]))
+    if "priority=" not in hit["path"] or "title=" not in hit["path"]:
+        bad(hit["path"])
+
+
+check("alert carries the snapshot", snapshot_push)
+
+
+def cooldown():
+    n = len(ntfy_hits)
+    r = push_form({"topic": "e2e-push", "server": NTFY, "dir": push_dir})
+    if r.get("skipped") != "cooldown" or len(ntfy_hits) != n:
+        bad(str(r))
+
+
+check("second alert inside a minute is swallowed", cooldown)
+
+
+def snooze_swallows():
+    call("snooze", {"minutes": 5})
+    n = len(ntfy_hits)
+    r = push_form({"topic": "e2e-push", "server": NTFY, "message": "hi"})
+    call("snooze", {"minutes": 0})
+    if r.get("skipped") != "snoozed" or len(ntfy_hits) != n:
+        bad(str(r))
+    if get("status")["snooze_until"] != 0:
+        bad("snooze did not clear")
+
+
+check("snooze swallows alerts and clears", snooze_swallows)
+
+PUSH = os.path.join(SRC, "push.sh")
+
+
+def script_relays():
+    n = len(ntfy_hits)
+    # Any directory exercises the event-dir branch; this one names no event,
+    # so the server sends a plain text alert.
+    p = subprocess.run(["sh", PUSH, "e2e-push2", NTFY, "/var/cache/zoneminder/events"],
+                       capture_output=True, text=True, timeout=90)
+    if p.returncode or len(ntfy_hits) == n:
+        bad(p.stderr[-200:] or "no hit reached ntfy")
+
+
+check("push.sh hands the event to the server", script_relays)
+
+
+def injection_safe():
+    n = len(ntfy_hits)
+    evil = "$(touch /tmp/e2e-pwned); `id`"
+    p = subprocess.run(["sh", PUSH, "e2e-push3", NTFY, evil],
+                       capture_output=True, text=True, timeout=90)
+    if p.returncode or len(ntfy_hits) == n:
+        bad(p.stderr[-200:] or "no hit reached ntfy")
+    if os.path.exists("/tmp/e2e-pwned"):
+        bad("the message was executed as shell")
+    if b"$(touch" not in ntfy_hits[-1]["body"]:
+        bad(str(ntfy_hits[-1]["body"][:100]))
+
+
+check("hostile text rides as text", injection_safe)
+
+
+def fallback_direct():
+    """Server down (fresh boot): push.sh must still reach ntfy on its own."""
+    n = len(ntfy_hits)
+    p = subprocess.run(["sh", PUSH, "e2e-push4", NTFY],
+                       env=dict(os.environ, PORCHLIGHT_PORT="9"),
+                       capture_output=True, text=True, timeout=60)
+    if p.returncode or len(ntfy_hits) == n:
+        bad(p.stderr[-200:] or "no hit reached ntfy")
+    if "e2e-push4" not in ntfy_hits[-1]["path"]:
+        bad(ntfy_hits[-1]["path"])
+
+
+check("push.sh alone still alerts when the server is down", fallback_direct)
+
+
+def timeline_counts():
+    t = get("timeline", {})
+    if len(t["hours"]) != 24 or sum(t["hours"]) < 1:
+        bad(str(t))
+
+
+check("timeline strip has today's recordings", timeline_counts)
+check("recordings sort by activity",
+      lambda: isinstance(get("events", {"sort": "score"})["events"], list)
+      or bad("no list came back"))
+
+# --- watchdog ----------------------------------------------------------------
+
+print("watchdog")
+# Stale push rules (screenshot runs leave one) would send these test alerts to
+# a real phone; the watchdog alerts every push target, so clear them first.
+for r in get("rules"):
+    if r.get("push"):
+        call("rule/delete", {"id": r["id"]})
+call("rule/save", {"name": "E2E watch", "what": "any",
+                   "push": "e2e-watch", "push_server": NTFY})
+server.kill()
+server.wait(timeout=10)
+server = start_server({"PORCHLIGHT_WATCHDOG": "2"})
+# The rtsp camera points at an unreachable address: turning it on makes a
+# camera that should capture but can't.
+call("camera/mode", {"id": rtsp_id, "function": "Monitor"})
+
+
+def offline_alert():
+    for _ in range(30):
+        if any("e2e-watch" in h["path"] and b"stopped" in h["body"] for h in ntfy_hits):
+            return
+        time.sleep(1)
+    bad("no offline alert within 30s")
+
+
+check("dead camera raises a phone alert", offline_alert)
+call("camera/mode", {"id": rtsp_id, "function": "None"})
+
+
+def disk_guard():
+    rows = zmapi.sql("SELECT Background FROM Filters WHERE Name='PurgeWhenFull'")
+    if not rows or rows[0][0] != "1":
+        bad(str(rows))
+
+
+check("disk guard filter runs in the background", disk_guard)
+for r in get("rules"):
+    if r["name"] == "E2E watch":
+        call("rule/delete", {"id": r["id"]})
+
+# --- person detection --------------------------------------------------------
+
+print("person detection")
+import detect  # noqa: E402  (sys.path + PORCHLIGHT_MODEL set at the top)
+
+
+def person_in_demo():
+    if not detect.available():
+        bad("onnxruntime or the model is missing in this container")
+    clip = "/var/cache/zoneminder/demo/garage.mp4"
+    if not os.path.isfile(clip):
+        return                                   # demo clips not staged
+    p = subprocess.run(["ffmpeg", "-v", "error", "-ss", "1", "-i", clip,
+                        "-frames:v", "1", "-f", "mjpeg", "-"], capture_output=True)
+    conf, box = detect.person(p.stdout)
+    if conf < 0.35 or not box:
+        bad("person score %.2f" % conf)
+    detect.draw_box(p.stdout, box, "/tmp/e2e-objdetect.jpg")
+    with open("/tmp/e2e-objdetect.jpg", "rb") as fh:
+        if fh.read(2) != b"\xff\xd8":
+            bad("draw_box wrote no JPEG")
+
+
+check("somebody in the demo clip is seen", person_in_demo)
+
+
+def test_pattern_is_nobody():
+    p = subprocess.run(["ffmpeg", "-v", "error", "-i",
+                        "/var/cache/zoneminder/testsrc/a.mp4",
+                        "-frames:v", "1", "-f", "mjpeg", "-"], capture_output=True)
+    conf, _ = detect.person(p.stdout)
+    if conf:
+        bad("saw a person in a test pattern: %.2f" % conf)
+
+
+check("test pattern shows nobody", test_pattern_is_nobody)
+
+
+def people_only_skips():
+    call("camera/people-only", {"id": ids[0], "on": True})
+    r = push_form({"topic": "e2e-person", "server": NTFY, "dir": push_dir})
+    call("camera/people-only", {"id": ids[0], "on": False})
+    if r.get("skipped") != "no person":
+        bad(str(r))
+
+
+check("people-only camera skips person-free events", people_only_skips)
 
 # --- run states --------------------------------------------------------------
 
@@ -421,6 +683,92 @@ def remote_media_needs_signin():
 
 check("camera video needs sign-in too", remote_media_needs_signin)
 
+# --- share links + backup ----------------------------------------------------
+
+print("share and backup")
+check("share refuses while phones are off",
+      lambda: call("share", {"id": 1}).get("ok") is False or bad("shared with lan off"))
+
+# Turning LAN viewing on re-execs the server on 0.0.0.0; wait for it to return.
+call("access/save", {"lan": True, "password": "e2e-share-pw"})
+time.sleep(2)
+for _ in range(40):
+    try:
+        urllib.request.urlopen(BASE + "/api/status", timeout=5)
+        break
+    except Exception:
+        time.sleep(0.5)
+
+
+def share_link_works():
+    evs = get("events", {"limit": 1})["events"]
+    if not evs:
+        bad("no event to share")
+    r = call("share", {"id": evs[0]["id"]})
+    if not r.get("ok"):
+        bad(str(r))
+    token = r["url"].rsplit("/share/", 1)[1]
+    eid = str(evs[0]["id"])
+    page = fetch(BASE + "/share/" + token, 4000)
+    if b"<video" not in page:
+        bad(str(page[:100]))
+    if b"ftyp" not in fetch(BASE + "/zm/index.php?view=view_video&eid=%s&share=%s"
+                            % (eid, token), 4000):
+        bad("share video did not play")
+    # The gate itself, called directly: this container has no /24 address, so
+    # a stranger's-eye HTTP request can't be made here (loopback is trusted).
+    import hmac as hm
+    import porchlight_server as ps
+    if ps.share_eid(token) != eid:
+        bad("valid token did not validate")
+    if not ps.share_ok("/zm/index.php?view=view_video&eid=%s&share=%s" % (eid, token)):
+        bad("valid share request refused")
+    if ps.share_ok("/zm/index.php?view=view_video&eid=999999&share=%s" % token):
+        bad("token unlocked a different event")
+    tampered = token[:-1] + ("0" if token[-1] != "0" else "1")
+    if ps.share_eid(tampered) is not None:
+        bad("tampered signature validated")
+    secret = ps.load_config()["share_secret"]
+    stale = "%s.%d" % (eid, int(time.time()) - 10)
+    expired = stale + "." + hm.new(secret.encode(), stale.encode(), "sha256").hexdigest()
+    if ps.share_eid(expired) is not None:
+        bad("expired token validated")
+
+
+check("share link plays, tampered and expired tokens do not", share_link_works)
+
+
+def backup_restores():
+    blob = fetch(BASE + "/api/backup", 10 ** 7)
+    import io
+    import tarfile
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+        names = {m.name for m in tar.getmembers()}
+    if not {"config.json", "monitors.json", "rules.json"} <= names:
+        bad(str(names))
+    victim = [c for c in get("cameras") if c["id"] == ids[1]][0]
+    call("camera/delete", {"id": ids[1]})
+    req = urllib.request.Request(BASE + "/api/restore", data=blob)
+    r = json.loads(urllib.request.urlopen(req, timeout=120).read().decode())
+    if not r.get("ok"):
+        bad(str(r))
+    back = [c for c in get("cameras") if c["name"] == victim["name"]]
+    if not back:
+        bad("the deleted camera did not come back")
+    ids[1] = back[0]["id"]
+
+
+check("backup round-trips a deleted camera", backup_restores)
+
+call("access/save", {"lan": False})
+time.sleep(2)
+for _ in range(40):
+    try:
+        urllib.request.urlopen(BASE + "/api/status", timeout=5)
+        break
+    except Exception:
+        time.sleep(0.5)
+
 # --- cleanup -----------------------------------------------------------------
 
 for mid in ids:
@@ -429,6 +777,11 @@ check("cameras removed", lambda: len(get("cameras")) == 0 or bad(str(get("camera
 
 server.kill()
 server.wait(timeout=10)
+try:
+    # Leftover LAN config breaks the next run's access checks.
+    os.remove(os.path.expanduser("~/.config/porchlight/config.json"))
+except OSError:
+    pass
 
 print()
 if failures:

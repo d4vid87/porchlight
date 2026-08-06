@@ -165,6 +165,7 @@ PAGES.cameras = async function () {
   const [cams, status] = await Promise.all([get("cameras"), get("status")]);
   state.cameras = cams;
   drawTiles(status);
+  drawSnooze(status);
   if (!cams.length) {
     grid.replaceChildren(welcomeCard());
     return;
@@ -255,19 +256,42 @@ function drawTiles(s) {
       el("div", { class: "muted" }, label), ...body);
   const gb = (n) => (n / 1e9).toFixed(0) + " GB";
   const st = s.storage || {};
+  const pct = st.total ? Math.round(100 * st.used / st.total) : 0;
   $("#tiles").replaceChildren(
     tile(() => { location.hash = "modes"; }, "Home / Away",
       el("div", { class: "big" }, s.state || "—")),
     tile(() => { location.hash = "system"; }, "Storage",
       el("div", { class: "bar-track" },
-        el("div", { class: "bar-fill", style: "width:" + (st.total ? (100 * st.used / st.total) : 0) + "%" })),
-      el("div", {}, st.total ? gb(st.free) + " free of " + gb(st.total) : "—")),
+        el("div", { class: "bar-fill",
+          style: "width:" + pct + "%" + (pct >= 90 ? ";background:var(--bad)" : "") })),
+      el("div", {}, st.total ? gb(st.free) + " free of " + gb(st.total)
+        + (pct >= 90 ? " — running low" : "") : "—")),
     tile(() => { location.hash = "recordings"; }, "Recordings today",
       el("div", { class: "big" }, s.today == null ? "—" : String(s.today))),
     tile(() => { location.hash = "system"; }, "System health",
       s.ok ? el("div", {}, "ZoneMinder " + s.version)
            : el("div", {}, "Not running ",
                el("button", { class: "link", onclick: (e) => { e.stopPropagation(); restart(); } }, "Fix it"))));
+}
+
+function drawSnooze(s) {
+  const bar = $("#snooze-bar");
+  bar.classList.remove("hidden");
+  const set = (m) => async () => {
+    try { await post("snooze", { minutes: m }); PAGES.cameras(); } catch (e) { fail(e); }
+  };
+  if (s.snooze_until * 1000 > Date.now()) {
+    const t = new Date(s.snooze_until * 1000);
+    bar.replaceChildren(
+      el("span", { class: "muted" },
+        "Phone alerts are snoozed until " + t.toTimeString().slice(0, 5) + "."),
+      el("button", { onclick: set(0) }, "Resume alerts"));
+  } else {
+    bar.replaceChildren(
+      el("span", { class: "muted" }, "Snooze phone alerts:"),
+      ...[["30 min", 30], ["1 hour", 60], ["8 hours", 480]].map(([label, m]) =>
+        el("button", { onclick: set(m) }, label)));
+  }
 }
 
 function watch(c) {
@@ -451,6 +475,13 @@ async function cameraSettings(id) {
     el("select", { onchange: (e) => { sensitivity = e.target.value; } },
       el("option", { value: "" }, "Leave as it is"),
       ["Low", "Normal", "High"].map((s) => el("option", { value: s }, s)))));
+  let peopleOnly = null;
+  if (data.smart) {
+    motion.prepend(el("label", { class: "check" },
+      el("input", { type: "checkbox", checked: !!data.people_only,
+        onchange: (e) => { peopleOnly = e.target.checked; } }),
+      "Alert my phone only when somebody is seen"));
+  }
 
   const tabs = { "Basics": pane(BASIC), "Connection": pane(CONNECTION), "Video": pane(VIDEO),
     "Motion": motion, "Control": pane(CONTROL), "Everything else": pane(rest) };
@@ -471,6 +502,7 @@ async function cameraSettings(id) {
       el("button", { class: "primary", onclick: async () => {
         try {
           if (sensitivity) await post("camera/sensitivity", { id, level: sensitivity });
+          if (peopleOnly !== null) await post("camera/people-only", { id, on: peopleOnly });
           await post("camera/save", Object.assign({ id }, edited));
           closeModal(); toast("Saved."); PAGES.cameras();
         } catch (e) { fail(e); }
@@ -688,6 +720,8 @@ function drawLive() {
 // --- page: recordings -------------------------------------------------------
 
 let recPage = 1;
+let recHour = null;
+const today = () => new Date().toLocaleDateString("sv");   // YYYY-MM-DD, local time
 
 PAGES.recordings = async function () {
   if (!state.cameras.length) state.cameras = await get("cameras");
@@ -696,21 +730,50 @@ PAGES.recordings = async function () {
     state.cameras.forEach((c) => sel.append(el("option", { value: c.id }, c.name)));
   }
   recPage = 1;
+  drawTimeline().catch(() => {});
   await loadRecordings(true);
 };
 
-["#rec-camera", "#rec-date", "#rec-cause", "#rec-kept"].forEach((s) =>
-  $(s).addEventListener("change", () => { recPage = 1; loadRecordings(true).catch(fail); }));
+// One cell per hour of the chosen day; click narrows the list to that hour.
+async function drawTimeline() {
+  const t = await get("timeline", { camera: $("#rec-camera").value,
+                                    day: $("#rec-date").value || today() });
+  const max = Math.max(...t.hours, 1);
+  $("#rec-timeline").replaceChildren(...t.hours.map((n, h) =>
+    el("div", {
+      class: "cell" + (recHour === h ? " sel" : ""),
+      style: "opacity:" + (n ? (0.3 + 0.7 * n / max).toFixed(2) : 0.08),
+      title: String(h).padStart(2, "0") + ":00 — " + n + (n === 1 ? " recording" : " recordings"),
+      onclick: () => {
+        recHour = recHour === h ? null : h;
+        recPage = 1;
+        loadRecordings(true).catch(fail);
+        drawTimeline().catch(() => {});
+      },
+    })));
+}
+
+["#rec-camera", "#rec-date", "#rec-cause", "#rec-kept", "#rec-sort"].forEach((s) =>
+  $(s).addEventListener("change", () => {
+    recPage = 1;
+    if (s === "#rec-camera" || s === "#rec-date") recHour = null;
+    loadRecordings(true).catch(fail);
+    drawTimeline().catch(() => {});
+  }));
 $("#rec-more").addEventListener("click", () => { recPage++; loadRecordings(false).catch(fail); });
 
 async function loadRecordings(reset) {
   const grid = $("#rec-grid");
   if (reset) grid.replaceChildren(el("p", { class: "muted" }, "Loading..."));
   const day = $("#rec-date").value;
+  const base = day || today();
+  const hh = recHour === null ? null : String(recHour).padStart(2, "0");
   const params = {
     camera: $("#rec-camera").value, cause: $("#rec-cause").value,
     archived: $("#rec-kept").checked ? "1" : "", page: recPage,
-    from: day ? day + " 00:00:00" : "", to: day ? day + " 23:59:59" : "",
+    sort: $("#rec-sort").value,
+    from: hh ? base + " " + hh + ":00:00" : (day ? day + " 00:00:00" : ""),
+    to: hh ? base + " " + hh + ":59:59" : (day ? day + " 23:59:59" : ""),
   };
   const r = await get("events", params);
   const cards = r.events.map(recCard);
@@ -731,10 +794,19 @@ function recCard(e) {
     el("div", { class: "body" },
       el("div", { class: "title" }, (cam ? cam.name : "Camera " + e.monitor)),
       el("div", { class: "muted" }, e.start + " · " + Math.round(Number(e.length || 0)) + "s"
-        + (e.cause ? " · " + e.cause : "")),
+        + (e.cause ? " · " + e.cause : "")
+        + (Number(e.score) ? " · activity " + e.score : "")),
       el("div", { class: "actions" },
         el("button", { onclick: () => playEvent(e) }, "Play"),
         el("a", { href: e.video, download: "" }, el("button", {}, "Save")),
+        el("button", { onclick: async () => {
+          try {
+            const r = await post("share", { id: e.id });
+            if (!r.ok) return toast(r.error, true);
+            try { await navigator.clipboard.writeText(r.url); } catch (_) { prompt("Copy this link:", r.url); }
+            toast("Link copied. Anyone with it can watch this recording for 3 days.");
+          } catch (err) { fail(err); }
+        } }, "Share"),
         el("button", { onclick: async () => {
           try { await post("event/action", { id: e.id, action: e.archived ? "unkeep" : "keep" });
             toast(e.archived ? "No longer kept." : "Kept forever."); loadRecordings(true); }
@@ -781,7 +853,8 @@ function ruleItem(r) {
   });
   const when = (r.what === "motion" ? "When movement is recorded" : "For every recording")
     + (named.length ? " on " + named.join(" and ") : " on any camera")
-    + (r.between ? ", between " + r.between[0] + " and " + r.between[1] : "");
+    + (r.between ? ", between " + r.between[0] + " and " + r.between[1] : "")
+    + (r.days === "weekdays" ? ", on weekdays" : r.days === "weekends" ? ", at weekends" : "");
   return el("div", { class: "item" },
     el("div", {}, el("strong", {}, r.name),
       el("div", { class: "muted" }, when + (does.length ? ", it " + does.join(" and ") : ""))),
@@ -808,11 +881,17 @@ function ruleModal(r) {
                                c.name)));
   const from = el("input", { type: "time", value: (r.between || [])[0] || "" });
   const to = el("input", { type: "time", value: (r.between || [])[1] || "" });
+  const daysSel = el("select", {},
+    el("option", { value: "", selected: !r.days }, "Any day"),
+    el("option", { value: "weekdays", selected: r.days === "weekdays" }, "Weekdays"),
+    el("option", { value: "weekends", selected: r.days === "weekends" }, "Weekends"));
   const email = el("input", { type: "checkbox", checked: !!r.email });
   const push = el("input", { type: "checkbox", checked: !!r.push });
   const keep = el("input", { type: "checkbox", checked: !!r.keep });
   const days = el("input", { type: "number", min: "0", placeholder: "0", style: "width:90px",
                              value: r.delete_after_days || "" });
+  const blips = el("input", { type: "number", min: "0", placeholder: "0", style: "width:90px",
+                              value: r.min_frames || "" });
   const cmd = el("input", { placeholder: "/usr/local/bin/my-script", value: r.command || "" });
 
   modal(el("h2", {}, r.id ? "Edit rule" : "New rule"),
@@ -820,13 +899,15 @@ function ruleModal(r) {
     el("div", { class: "fields" },
       el("label", {}, "these cameras (none = all)", cams),
       el("label", {}, "Name", name),
-      el("label", {}, "Between (optional)", el("div", { class: "row" }, from, "and", to))),
+      el("label", {}, "Between (optional)", el("div", { class: "row" }, from, "and", to)),
+      el("label", {}, "On", daysSel)),
     el("div", { class: "list" },
       el("label", { class: "check" }, email, "Email me"),
       el("label", { class: "check" }, push, "Send an alert to my phone"),
       el("label", { class: "check" }, keep, "Keep the recording forever")),
     el("details", {}, el("summary", {}, "Show advanced"),
       el("div", { class: "fields" },
+        el("label", {}, "Ignore blips with fewer movement frames than (0 = keep all)", blips),
         el("label", {}, "Delete recordings older than (days, 0 = never)", days),
         el("label", {}, "Run this program", cmd))),
     el("div", { class: "row" }, el("span", { style: "flex:1" }),
@@ -839,6 +920,8 @@ function ruleModal(r) {
             cameras: [...cams.selectedOptions].map((o) => o.value),
             what: what.value,
             between: from.value && to.value ? [from.value, to.value] : null,
+            days: daysSel.value || null,
+            min_frames: Number(blips.value) || null,
             email: email.checked, keep: keep.checked,
             push: push.checked ? pushTopic() : null,
             push_server: pushServer(),
@@ -1125,6 +1208,19 @@ $("#lan-save").addEventListener("click", async () => {
     $("#lan-msg").textContent = r.restarting
       ? "Saved. Reload this page in a moment." : "Saved.";
   } catch (e) { $("#lan-msg").textContent = "Failed: " + e.message; }
+});
+
+$("#restore-btn").addEventListener("click", () => $("#restore-file").click());
+$("#restore-file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  $("#restore-msg").textContent = "Restoring...";
+  try {
+    const r = await (await fetch("/api/restore", { method: "POST", body: f })).json();
+    $("#restore-msg").textContent = r.ok ? "Restored " + r.added + " items." : (r.error || "Failed.");
+    PAGES.system().catch(() => {});
+  } catch (err) { $("#restore-msg").textContent = "Failed: " + err.message; }
+  e.target.value = "";
 });
 
 $("#btn-restart").addEventListener("click", restart);
