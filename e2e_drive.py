@@ -72,15 +72,25 @@ def check(name, fn):
 
 # ponytail: keep the server off our stdout, or a piped run blocks until it dies.
 log = open("/tmp/porchlight-server.log", "wb")
-server = subprocess.Popen([sys.executable, os.path.join(SRC, "server", "porchlight_server.py")],
-                          env=dict(os.environ, PORCHLIGHT_WEBDIR=os.path.join(SRC, "web")),
-                          stdout=log, stderr=log)
-for _ in range(60):
-    try:
-        urllib.request.urlopen(BASE + "/api/status", timeout=5)
-        break
-    except Exception:
-        time.sleep(0.3)
+
+
+def start_server():
+    s = subprocess.Popen([sys.executable, os.path.join(SRC, "server", "porchlight_server.py")],
+                         env=dict(os.environ, PORCHLIGHT_WEBDIR=os.path.join(SRC, "web")),
+                         stdout=log, stderr=log)
+    for _ in range(60):
+        try:
+            urllib.request.urlopen(BASE + "/api/status", timeout=5)
+            break
+        except Exception:
+            time.sleep(0.3)
+    if s.poll() is not None:
+        # A leftover server on 8321 would answer for us and hide real failures.
+        raise RuntimeError("server died at start, see /tmp/porchlight-server.log")
+    return s
+
+
+server = start_server()
 
 print("status page")
 status = call("status")
@@ -147,6 +157,62 @@ for i, mid in enumerate(ids):
 
 check("running camera reads as ok",
       lambda: same([c["status"] for c in get("cameras") if c["id"] == ids[0]][0], "ok"))
+
+
+def two_streams_at_once():
+    """Two live streams with distinct connkeys must not kill each other."""
+    import threading
+    out = {}
+
+    def grab(k):
+        try:
+            out[k] = fetch(zmapi.stream_url(ids[0]), 2048)
+        except Exception as e:
+            out[k] = e
+    threads = [threading.Thread(target=grab, args=(k,)) for k in (0, 1)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    for k in (0, 1):
+        if not isinstance(out.get(k), bytes) or b"\xff\xd8" not in out[k]:
+            bad(str(out.get(k))[:120])
+
+
+check("two streams run at once", two_streams_at_once)
+
+# --- MaxFPS repair ------------------------------------------------------------
+# MaxFPS=10 on a network camera throttles zmc's read loop and smears frames,
+# but on a file camera it is what paces playback. New network cameras must not
+# get it, a restarted server must clear it from old ones, and file cameras
+# must keep theirs.
+
+print("maxfps repair")
+
+
+def cap_of(mid):
+    return str(get("camera", {"id": mid})["monitor"]["MaxFPS"])
+
+
+check("file camera keeps its pacing cap",
+      lambda: cap_of(ids[0]) in ("10", "10.00") or bad("MaxFPS=%s" % cap_of(ids[0])))
+
+# An unreachable, switched-off network camera: only its saved fields matter.
+rtsp_id = call("camera/add", {"name": "Net", "kind": "rtsp",
+                              "path": "rtsp://192.0.2.9/e2e", "function": "None"})["id"]
+ids.append(rtsp_id)
+check("network camera gets no frame cap",
+      lambda: cap_of(rtsp_id) not in ("10", "10.00") or bad("MaxFPS=10 on a fresh camera"))
+
+call("camera/save", {"id": rtsp_id, "MaxFPS": "10"})
+server.kill()
+server.wait(timeout=10)
+server = start_server()
+get("cameras")                                   # first listing runs the sweep
+check("old network frame cap swept away",
+      lambda: cap_of(rtsp_id) not in ("10", "10.00") or bad("sweep left MaxFPS=10"))
+check("sweep spared the file camera",
+      lambda: cap_of(ids[0]) in ("10", "10.00") or bad("MaxFPS=%s" % cap_of(ids[0])))
 
 # --- zones -------------------------------------------------------------------
 

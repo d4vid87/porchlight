@@ -200,7 +200,6 @@ def monitor_fields(name, url, function, prefix="Monitor"):
         "Width": "1920",
         "Height": "1080",
         "Colours": "4",
-        "MaxFPS": "10",
         "SaveJPEGs": "0",
         "VideoWriter": "1",  # store the camera's own video stream, no re-encoding
         "RecordAudio": "0",
@@ -233,6 +232,11 @@ def source_fields(kind, path, width, height):
         f.update(Path=path, Colours="4", VideoWriter="1", SaveJPEGs="0")
         if kind == "rtsp":
             f["Method"] = "rtpRtsp"
+        else:
+            # Files decode as fast as the CPU allows, so without a cap zmc
+            # finishes the clip in seconds and respawns forever. Never set
+            # this on a network camera: it drops packets and smears frames.
+            f["MaxFPS"] = "10"
     return f
 
 

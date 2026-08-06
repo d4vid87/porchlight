@@ -20,6 +20,18 @@ function el(tag, attrs = {}, ...kids) {
   return n;
 }
 
+// Live MJPEG streams need care: every <img> must carry its own connkey (two
+// streams on one connkey kill each other) and a dropped stream must have its
+// src cleared, or the nph-zms process behind it lives on and starves the
+// browser's ~6-connections-per-origin budget.
+const FPS = { 30: 5, 50: 10, 100: 15 };   // quality scale -> maxfps
+function streamSrc(url, scale) {
+  return url.replace(/connkey=\d+/, "connkey=" + Math.floor(100000 + Math.random() * 900000))
+            .replace(/scale=\d+/, "scale=" + scale)
+            .replace(/maxfps=\d+/, "maxfps=" + (FPS[scale] || 10));
+}
+function killStreams(node) { $$("img", node).forEach((i) => { i.src = ""; }); }
+
 async function get(path, params = {}) {
   const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== "" && v !== undefined));
   const r = await fetch("/api/" + path + (q.toString() ? "?" + q : ""));
@@ -56,7 +68,7 @@ function modal(...content) {
   $("#modal").classList.remove("hidden");
   return body;
 }
-function closeModal() { $("#modal").classList.add("hidden"); $("#modal-body").replaceChildren(); }
+function closeModal() { $("#modal").classList.add("hidden"); killStreams($("#modal-body")); $("#modal-body").replaceChildren(); }
 $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
 
 function viewer(...content) {
@@ -64,7 +76,7 @@ function viewer(...content) {
   v.replaceChildren(...content);
   v.classList.remove("hidden");
 }
-function closeViewer() { const v = $("#viewer"); v.classList.add("hidden"); v.replaceChildren(); }
+function closeViewer() { const v = $("#viewer"); v.classList.add("hidden"); killStreams(v); v.replaceChildren(); }
 $("#viewer").addEventListener("click", (e) => { if (e.target.id === "viewer") closeViewer(); });
 addEventListener("keydown", (e) => { if (e.key === "Escape") { closeViewer(); closeModal(); } });
 
@@ -259,7 +271,7 @@ function drawTiles(s) {
 }
 
 function watch(c) {
-  const img = el("img", { src: c.stream, alt: c.name });
+  const img = el("img", { src: streamSrc(c.stream, 100), alt: c.name });
   viewer(img, el("div", { class: "bar" },
     el("span", { class: "muted", style: "color:#ddd" }, c.name),
     c.controllable && el("button", { onclick: () => ptzPad(c) }, "Move camera"),
@@ -615,9 +627,12 @@ function ptzPad(c) {
 // --- page: live view --------------------------------------------------------
 
 let liveTimer = null;
+let liveRefresh = null;
 
 function stopLive(clear) {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (liveRefresh) { clearInterval(liveRefresh); liveRefresh = null; }
+  killStreams($("#live-grid"));
   if (clear) $("#live-grid").replaceChildren();
 }
 
@@ -638,14 +653,20 @@ function drawLive() {
   const scale = $("#live-quality").value;
   const grid = $("#live-grid");
   grid.className = "live-grid n" + n;
+  // Browsers allow ~6 sockets per origin, so 9/16-up grids can never hold a
+  // stream per pane; they show stills refreshed in place instead.
+  const mjpeg = n <= 4;
+  if (state.cameras.length <= n) liveOffset = 0;
 
   const render = () => {
     const cams = state.cameras;
+    killStreams(grid);
     const panes = [];
     for (let i = 0; i < n; i++) {
-      const c = cams.length ? cams[(liveOffset + i) % cams.length] : null;
+      const c = cams.length > n ? cams[(liveOffset + i) % cams.length] : cams[i];
       if (!c) { panes.push(el("div", { class: "pane empty" }, "No camera")); continue; }
-      const src = c.stream.replace(/scale=\d+/, "scale=" + scale);
+      const src = mjpeg ? streamSrc(c.stream, scale)
+        : c.snapshot.replace(/scale=\d+/, "scale=" + scale).replace(/rand=\d+/, "rand=" + Date.now());
       panes.push(el("div", { class: "pane" },
         el("img", { src, alt: c.name, onclick: () => watch(c) }),
         el("div", { class: "label" }, c.name)));
@@ -654,6 +675,11 @@ function drawLive() {
   };
   render();
 
+  if (!mjpeg) {
+    liveRefresh = setInterval(() => $$(".pane img", grid).forEach((i) => {
+      i.src = i.src.replace(/rand=\d+/, "rand=" + Date.now());
+    }), 3000);
+  }
   if ($("#live-cycle").checked && state.cameras.length > n) {
     liveTimer = setInterval(() => { liveOffset = (liveOffset + n) % state.cameras.length; render(); }, 8000);
   }

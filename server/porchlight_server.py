@@ -112,10 +112,31 @@ def last_events():
     return {r[0]: int(r[1]) for r in rows if len(r) == 2 and r[1] not in ("NULL", "")}
 
 
+_swept = False
+
+
 def h_cameras(_):
+    global _swept
+    monitors = zmapi.api("monitors.json").get("monitors", [])
+    if not _swept:
+        _swept = True
+        for row in monitors:
+            m = row["Monitor"]
+            # Our old creation default; it throttles zmc's read loop on stream
+            # sources and smears frames. Clear that exact value only, so a cap
+            # someone set on purpose survives. Local files keep it: there the
+            # cap is what paces playback (see zmapi.source_fields).
+            if (m.get("Type") == "Ffmpeg" and str(m.get("MaxFPS")) in ("10", "10.00")
+                    and not (m.get("Path") or "").startswith("/")):
+                try:
+                    zmapi.api("monitors/%s.json" % m["Id"],
+                              data={"Monitor[MaxFPS]": ""}, method="PUT")
+                    m["MaxFPS"] = None
+                except Exception:
+                    _swept = False          # retry on the next visit
     out = []
     last = last_events()
-    for el in zmapi.api("monitors.json").get("monitors", []):
+    for el in monitors:
         m = el["Monitor"]
         out.append({
             "status": zmapi.monitor_status(m, (el.get("Monitor_Status") or {})),
