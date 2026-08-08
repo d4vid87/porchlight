@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build porchlight_2.2_all.deb
+# Build porchlight_2.3_all.deb
 set -e
 cd "$(dirname "$0")"
 
@@ -29,5 +29,5 @@ install -m 644 admin/com.porchlight.policy build/usr/share/polkit-1/actions/com.
 install -m 644 porchlight.desktop build/usr/share/applications/porchlight.desktop
 install -m 644 porchlight.png build/usr/share/icons/hicolor/256x256/apps/porchlight.png
 
-dpkg-deb --root-owner-group --build build porchlight_2.2_all.deb
-echo "built porchlight_2.2_all.deb"
+dpkg-deb --root-owner-group --build build porchlight_2.3_all.deb
+echo "built porchlight_2.3_all.deb"

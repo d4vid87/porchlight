@@ -24,8 +24,9 @@
 - **Private by design.** Video is recorded, stored and watched on your own computer.
   No account, no cloud, no subscription — nothing leaves your house unless you send it.
 - **Somebody at the door, not "motion detected".** A small person detector
-  (NanoDet, Apache-2.0) runs on your own CPU once per recording. A person makes the
-  alert urgent and puts them in the picture; wind and headlights don't. The headline
+  (NanoDet, Apache-2.0) runs on your own CPU once per recording — every recording,
+  whether or not it rang your phone. A person makes the alert urgent and puts them in
+  the picture; wind and headlights don't. Cats, dogs and birds get named too. The headline
   feature of every camera subscription, running at home.
 - **Works with cameras you already own.** Porchlight scans your network with ONVIF and
   fills in the technical details itself. RTSP addresses, USB webcams, MJPEG cameras and
@@ -94,7 +95,9 @@ through them. Click a picture to fill the screen with it.
 A 24-hour strip shows when things happened; click an hour to jump straight to it.
 Filter by camera, day, motion or continuous, and kept-forever; sort newest first or
 most movement first, or narrow the list to **People only** — recordings where the
-detector actually saw somebody wear a "Somebody" badge. Click to play, save the clip,
+detector actually saw somebody wear a "Somebody" badge, and a cat, dog or bird wears
+an "Animal" one. Every recording is looked at within a minute of it closing, alerted
+or not. Click to play, save the clip,
 keep it forever, or **Share** it — an expiring three-day link anyone can watch without
 your password.
 
@@ -120,7 +123,7 @@ answering, your phone hears about that too. Email settings and a test button liv
 the same page.
 
 What the detector saw is written into ZoneMinder's own record as
-`detected:person(96%)`, plus an outlined `objdetect.jpg` — the wording
+`detected:person(96%),dog(84%)`, plus an outlined `objdetect.jpg` — the wording
 [zmeventnotification](https://github.com/ZoneMinder/zmeventnotification) established,
 so ZoneMinder's console and zmNinja show it the way their users expect.
 
@@ -158,14 +161,16 @@ which can then be saved to the home screen as an app.
 
 Per-camera **Settings** covers basics, connection, video, motion, PTZ control and, on
 the last tab, every remaining ZoneMinder monitor field. **Areas** is a polygon editor
-over a live snapshot for motion zones and privacy masks.
+over a live snapshot for motion zones and privacy masks. An area set to "Ignore this
+area" also hides that spot from the detector, so the neighbour's driveway stops
+producing "Somebody".
 
 ## Getting started
 
 Porchlight runs on Debian and Ubuntu.
 
 ```sh
-sudo apt install ./porchlight_2.2_all.deb
+sudo apt install ./porchlight_2.3_all.deb
 porchlight
 ```
 
@@ -204,7 +209,7 @@ recordings, same database, linked from the System page.
 ### Development
 
 ```sh
-./build.sh                 # builds porchlight_2.2_all.deb
+./build.sh                 # builds porchlight_2.3_all.deb
 python3 test_api.py        # pure-logic checks, prints "ok"
 python3 e2e_drive.py       # full end-to-end run, needs a working ZoneMinder
 python3 shots.py OUTDIR    # demo data + the screenshots above (needs Xvfb)
@@ -220,3 +225,9 @@ Two dead projects shaped this round. **zmeventnotification** (archived) is where
 **zmMagik** (archived, GPL-2.0) is where "your day in a minute" and "find this" come
 from. Porchlight reimplements those ideas on its own stack — Perl daemons, OpenCV and
 YOLO weights don't belong in a small .deb — and copies no code from either.
+
+**[zm_ai](https://github.com/lbdc/zm_ai)** suggested three more: look at every new
+recording rather than only the ones that alert, name animals as well as people, and
+let a zone switch the detector off for part of the frame. Porchlight does those on its
+own CPU detector — zm_ai's design puts PyTorch and a spare NVIDIA machine beside your
+server — and copies no code.

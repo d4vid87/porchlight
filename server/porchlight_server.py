@@ -324,11 +324,14 @@ def h_events(q):
         ev = e["Event"]
         # ponytail: "somebody was seen" is post-filtered here rather than sent
         # as a LIKE term -- 1.36's event index takes exact values only.
-        person = (ev.get("Notes") or "").startswith("detected:")
+        notes = ev.get("Notes") or ""
+        person = notes.startswith("detected:") and "person(" in notes
+        animal = notes.startswith("detected:") and any(
+            a + "(" in notes for a in ("bird", "cat", "dog"))
         if q.get("people") in ("1", 1, "true") and not person:
             continue
         out.append({
-            "person": person, "notes": ev.get("Notes") or "",
+            "person": person, "animal": animal, "notes": notes,
             "id": ev["Id"], "monitor": ev.get("MonitorId"), "name": ev.get("Name"),
             "start": ev.get("StartTime"), "length": ev.get("Length"),
             "frames": ev.get("Frames"), "alarm": ev.get("AlarmFrames"),
@@ -590,20 +593,42 @@ def event_dir_ids(path):
     return mid, eid
 
 
-def note_person(eid, conf):
+def note_detected(eid, hits):
     """Record what was seen in ZoneMinder's own Notes field.
 
-    The wording is zmeventnotification's ("detected:person(96%)"), so
-    ZoneMinder's console and zmNinja show it the way their users expect.
+    The wording is zmeventnotification's ("detected:person(96%),dog(84%)", a
+    person always first), so ZoneMinder's console and zmNinja show it the way
+    their users expect.
     """
-    if not eid:
+    if not eid or not hits:
         return
+    order = sorted(hits, key=lambda k: (k != "person", -hits[k][0]))
+    note = "detected:" + ",".join("%s(%d%%)" % (k, round(hits[k][0] * 100)) for k in order)
     try:
         zmapi.sql("UPDATE Events SET Notes=%s WHERE Id=%s"
-                  % (zmapi.quote("detected:person(%d%%)" % round(conf * 100)),
-                     zmapi.quote(eid)))
+                  % (zmapi.quote(note), zmapi.quote(eid)))
     except Exception:
         pass                                  # never let bookkeeping stop an alert
+
+
+def ignore_polys(mid):
+    """Inactive-zone polygons of one monitor, as 0-1 fractions of the frame."""
+    try:
+        m = zmapi.api("monitors/%s.json" % mid)["monitor"]["Monitor"]
+        w, h = float(m["Width"]), float(m["Height"])
+        return [[(x / w, y / h) for x, y in zmapi.parse_coords(z["Coords"])]
+                for z in zones_of(mid) if z.get("Type") == "Inactive"]
+    except Exception:
+        return []
+
+
+def drop_ignored(hits, polys):
+    """Detections whose box centre sits inside an ignored area are dropped."""
+    if not polys:
+        return hits
+    return {k: (c, b) for k, (c, b) in hits.items()
+            if not any(zmapi.point_in_poly((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, p)
+                       for p in polys)}
 
 
 def mqtt_publish(suffix, payload, retain=False):
@@ -681,25 +706,30 @@ def h_push(body):
 
     # No snapshot means nobody can tell who is there: alert anyway (fail open)
     # rather than let a broken snapshot pipeline silence the phone.
-    person = 0.0
+    person, animal = False, False
     if jpeg and detect.available():
-        conf, box = detect.person(jpeg)
-        person = conf
-        if conf:
-            priority = 5
-            message = "Somebody seen at %s" % when
-            note_person(eid, conf)
-            if box and body.get("dir") and os.path.isdir(body["dir"]):
+        hits = drop_ignored(detect.look(jpeg), ignore_polys(mid) if mid else [])
+        person = "person" in hits
+        animal = any(k != "person" for k in hits)
+        if hits:
+            if person:
+                priority = 5
+                message = "Somebody seen at %s" % when
+            else:
+                message = "Animal seen at %s" % when
+            note_detected(eid, hits)
+            if body.get("dir") and os.path.isdir(body["dir"]):
                 try:
                     # ZoneMinder's event pages pick this file up by name.
-                    detect.draw_box(jpeg, box, os.path.join(body["dir"], "objdetect.jpg"))
+                    detect.draw_box(jpeg, [b for _, b in hits.values()],
+                                    os.path.join(body["dir"], "objdetect.jpg"))
                 except Exception:
                     pass                      # event dirs belong to www-data
 
     # Home automation wants every event; the gates below exist to spare the
     # phone, not the house.
     mqtt_event({"camera": title, "monitor": mid, "event": eid, "cause": cause,
-                "person": bool(person), "score": score, "when": when})
+                "person": person, "animal": animal, "score": score, "when": when})
 
     if snoozed_now:
         return {"ok": True, "skipped": "snoozed"}
@@ -903,6 +933,63 @@ def ensure_disk_guard():
         pass
 
 
+_seen = set()          # scanned this session but still above a held-back high-water line
+
+
+def scan_new_events():
+    """Tag people and animals in every completed recording, alerted or not."""
+    if not detect.available():
+        return
+    highwater = os.path.join(CACHE, "scanned")   # one line: newest Id looked at
+    try:
+        hw = int(open(highwater).read())
+    except (OSError, ValueError):
+        hw = int(zmapi.sql("SELECT COALESCE(MAX(Id),0) FROM Events")[0][0])
+    rows = zmapi.sql(
+        "SELECT Id, MonitorId, DATE(StartDateTime) FROM Events"
+        " WHERE Id > %d AND EndDateTime IS NOT NULL"
+        " AND (Notes IS NULL OR Notes NOT LIKE 'detected:%%')"
+        " ORDER BY Id LIMIT 8" % hw)   # ponytail: 8/pass (~1s CPU each); raise if
+                                       # catching up after downtime drags
+    polys = {}
+    for eid, mid, day in rows:
+        if int(eid) in _seen:
+            continue
+        _seen.add(int(eid))
+        jpeg = snapshot_jpeg(eid)
+        if not jpeg:
+            continue                          # frameless or already purged
+        if mid not in polys:
+            polys[mid] = ignore_polys(mid)
+        hits = drop_ignored(detect.look(jpeg), polys[mid])
+        if not hits:
+            continue
+        note_detected(eid, hits)
+        d = os.path.join(zmapi.EVENTS_DIR, str(mid), day, str(eid))
+        # ponytail: Medium storage scheme only (the 1.36 default); Deep installs
+        # just miss objdetect.jpg -- read Events.Scheme per event if that matters.
+        if os.path.isdir(d):
+            try:
+                detect.draw_box(jpeg, [b for _, b in hits.values()],
+                                os.path.join(d, "objdetect.jpg"))
+            except Exception:
+                pass                          # event dirs belong to www-data
+    ids = [int(r[0]) for r in rows]
+    # A recording still being written holds the line back, so it is scanned once
+    # it closes instead of being skipped under it.
+    # An event open for over an hour is a capture that died, not a recording in
+    # progress; holding the line back for one would stop the scan forever.
+    floor = int(zmapi.sql("SELECT COALESCE(MIN(Id)-1, 1000000000000) FROM Events"
+                          " WHERE EndDateTime IS NULL"
+                          " AND StartDateTime > NOW() - INTERVAL 1 HOUR")[0][0])
+    new_hw = min(max(ids, default=hw), floor)
+    if new_hw > hw:
+        _seen.difference_update({i for i in _seen if i <= new_hw})
+        os.makedirs(CACHE, exist_ok=True)
+        with open(highwater, "w") as fh:
+            fh.write(str(new_hw))
+
+
 def watchdog():
     """Cameras that should be capturing but aren't get one phone alert after
     two consecutive misses, and one more when they come back."""
@@ -941,6 +1028,10 @@ def watchdog():
                         for topic, server in targets:
                             send_ntfy(server, topic, m.get("Name") or "Camera",
                                       "Back online.", 3)
+        try:
+            scan_new_events()
+        except Exception:
+            pass                    # a bad pass must not stop the camera watch
 
 
 def h_timeline(q):

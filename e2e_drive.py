@@ -503,7 +503,9 @@ call("rule/save", {"name": "E2E watch", "what": "any",
                    "push": "e2e-watch", "push_server": NTFY})
 server.kill()
 server.wait(timeout=10)
-server = start_server({"PORCHLIGHT_WATCHDOG": "2"})
+# No model: the background scan shares this loop, and a backlog of detections
+# would eat into the 30s the offline alert is timed against.
+server = start_server({"PORCHLIGHT_WATCHDOG": "2", "PORCHLIGHT_MODEL": "/nonexistent"})
 # The rtsp camera points at an unreachable address: turning it on makes a
 # camera that should capture but can't.
 call("camera/mode", {"id": rtsp_id, "function": "Monitor"})
@@ -544,12 +546,12 @@ def person_in_demo():
     clip = "/var/cache/zoneminder/demo/garage.mp4"
     if not os.path.isfile(clip):
         return                                   # demo clips not staged
-    p = subprocess.run(["ffmpeg", "-v", "error", "-ss", "1", "-i", clip,
+    p = subprocess.run(["ffmpeg", "-v", "error", "-ss", "3", "-i", clip,
                         "-frames:v", "1", "-f", "mjpeg", "-"], capture_output=True)
     conf, box = detect.person(p.stdout)
     if conf < 0.35 or not box:
         bad("person score %.2f" % conf)
-    detect.draw_box(p.stdout, box, "/tmp/e2e-objdetect.jpg")
+    detect.draw_box(p.stdout, [box], "/tmp/e2e-objdetect.jpg")
     with open("/tmp/e2e-objdetect.jpg", "rb") as fh:
         if fh.read(2) != b"\xff\xd8":
             bad("draw_box wrote no JPEG")
@@ -562,12 +564,12 @@ def test_pattern_is_nobody():
     p = subprocess.run(["ffmpeg", "-v", "error", "-i",
                         "/var/cache/zoneminder/testsrc/a.mp4",
                         "-frames:v", "1", "-f", "mjpeg", "-"], capture_output=True)
-    conf, _ = detect.person(p.stdout)
-    if conf:
-        bad("saw a person in a test pattern: %.2f" % conf)
+    hits = detect.look(p.stdout)
+    if hits:
+        bad("saw %s in a test pattern" % list(hits))
 
 
-check("test pattern shows nobody", test_pattern_is_nobody)
+check("test pattern shows nobody and no animals", test_pattern_is_nobody)
 
 
 def people_only_skips():
@@ -588,13 +590,40 @@ check("people-only camera skips person-free events", people_only_skips)
 def notes_written():
     """What was seen goes into ZoneMinder's own Notes field, ES's wording."""
     import porchlight_server                     # noqa: E402
-    porchlight_server.note_person(push_ev["id"], 0.96)
+    porchlight_server.note_detected(push_ev["id"], {"dog": (0.7, None), "person": (0.9, None)})
     rows = zmapi.sql("SELECT Notes FROM Events WHERE Id=%s" % zmapi.quote(push_ev["id"]))
-    if not rows or not rows[0][0].startswith("detected:person("):
+    if not rows or rows[0][0] != "detected:person(90%),dog(70%)":
         bad(str(rows))
 
 
 check("detection is written into the recording", notes_written)
+
+
+def animal_flags():
+    """A cat-only recording is an Animal, not a Somebody, and people=1 skips it."""
+    import porchlight_server                     # noqa: E402
+    porchlight_server.note_detected(ev["id"], {"cat": (0.8, None)})
+    got = [e for e in get("events", {})["events"] if str(e["id"]) == str(ev["id"])]
+    if not got or got[0]["person"] or not got[0]["animal"]:
+        bad(str(got))
+    if any(str(e["id"]) == str(ev["id"]) for e in get("events", {"people": "1"})["events"]):
+        bad("animal-only recording listed under people")
+
+
+def ignore_zone_drops():
+    """A detection inside an Inactive zone is dropped; one outside survives."""
+    import porchlight_server                     # noqa: E402
+    polys = [[(0.0, 0.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)]]
+    inside = {"person": (0.9, (0.1, 0.1, 0.3, 0.3))}
+    outside = {"person": (0.9, (0.6, 0.6, 0.9, 0.9))}
+    if porchlight_server.drop_ignored(inside, polys):
+        bad("detection inside an ignored area was kept")
+    if not porchlight_server.drop_ignored(outside, polys):
+        bad("detection outside an ignored area was dropped")
+
+
+check("animal recordings are badged, not counted as people", animal_flags)
+check("ignored areas hide detections", ignore_zone_drops)
 
 
 def people_filter():
@@ -606,6 +635,45 @@ def people_filter():
 
 
 check("recordings can be narrowed to people", people_filter)
+
+# --- background scan ----------------------------------------------------------
+
+print("background scan")
+HIGHWATER = os.path.expanduser("~/.cache/porchlight/scanned")
+
+
+def background_scan():
+    """Every completed recording gets looked at, alerted or not."""
+    global server
+    scanned = force_event(ids[0])
+    if not scanned:
+        bad("nothing recorded")
+    os.makedirs(os.path.dirname(HIGHWATER), exist_ok=True)
+    with open(HIGHWATER, "w") as fh:
+        fh.write(str(int(scanned["id"]) - 1))
+    server.kill()
+    server.wait(timeout=10)
+    server = start_server({"PORCHLIGHT_WATCHDOG": "3"})
+    for _ in range(40):
+        time.sleep(1)
+        try:
+            with open(HIGHWATER) as fh:
+                if int(fh.read()) >= int(scanned["id"]):
+                    break
+        except (OSError, ValueError):
+            pass
+    else:
+        bad("the scan never reached event %s" % scanned["id"])
+    # A test pattern holds nobody, so the scan must leave it untagged.
+    rows = zmapi.sql("SELECT Notes FROM Events WHERE Id=%s" % zmapi.quote(scanned["id"]))
+    if rows and (rows[0][0] or "").startswith("detected:"):
+        bad("tagged a test pattern: %s" % rows[0][0])
+    server.kill()
+    server.wait(timeout=10)
+    server = start_server()
+
+
+check("unalerted recordings are scanned too", background_scan)
 
 # --- alerts as fast as ZoneMinder allows -------------------------------------
 

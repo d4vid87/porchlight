@@ -515,6 +515,16 @@ def parse_coords(s):
     return [tuple(int(v) for v in p.split(",")) for p in s.split()]
 
 
+def point_in_poly(x, y, points):
+    """Ray cast: is (x, y) inside the polygon? Same units as the points."""
+    inside = False
+    for i, (x1, y1) in enumerate(points):
+        x2, y2 = points[i - 1]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
 def zone_fields(mid, name, ztype, points, min_pct=6, prefix="Zone"):
     """Full field set for creating or replacing a zone from a polygon."""
     area = polygon_area(points)

@@ -794,7 +794,8 @@ function recCard(e) {
                 onclick: () => playEvent(e) }),
     el("div", { class: "body" },
       el("div", { class: "title" }, (cam ? cam.name : "Camera " + e.monitor),
-        e.person && el("span", { class: "badge" }, "Somebody")),
+        e.person && el("span", { class: "badge" }, "Somebody"),
+        e.animal && el("span", { class: "badge" }, "Animal")),
       el("div", { class: "muted" }, e.start + " · " + Math.round(Number(e.length || 0)) + "s"
         + (e.cause ? " · " + e.cause : "")
         + (Number(e.score) ? " · activity " + e.score : "")),

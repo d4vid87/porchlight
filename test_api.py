@@ -185,4 +185,15 @@ h = z.mysql_password_hash("zmpass")
 assert h == "*" + hashlib.sha1(hashlib.sha1(b"zmpass").digest()).hexdigest().upper()
 assert len(h) == 41 and h.startswith("*")
 
+# --- ignored areas (a detection inside one is dropped)
+square = [(0, 0), (10, 0), (10, 10), (0, 10)]
+assert z.point_in_poly(5, 5, square)
+assert not z.point_in_poly(15, 5, square)
+ell = [(0, 0), (10, 0), (10, 4), (4, 4), (4, 10), (0, 10)]     # concave
+assert z.point_in_poly(2, 8, ell) and not z.point_in_poly(8, 8, ell)
+
+# --- the classes worth telling somebody about
+import detect                                                  # noqa: E402
+assert detect.CLASSES == {0: "person", 14: "bird", 15: "cat", 16: "dog"}
+
 print("ok")
