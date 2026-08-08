@@ -560,6 +560,21 @@ def person_in_demo():
 check("somebody in the demo clip is seen", person_in_demo)
 
 
+def two_image_snapshot():
+    """ZoneMinder's snapshot can carry two images; both used to read as nobody."""
+    clip = "/var/cache/zoneminder/demo/garage.mp4"
+    if not os.path.isfile(clip):
+        return
+    p = subprocess.run(["ffmpeg", "-v", "error", "-ss", "3", "-i", clip,
+                        "-frames:v", "1", "-f", "mjpeg", "-"], capture_output=True)
+    conf, _ = detect.person(p.stdout + p.stdout)
+    if conf < 0.35:
+        bad("a two-image snapshot read as nobody")
+
+
+check("a snapshot holding two images still reads", two_image_snapshot)
+
+
 def test_pattern_is_nobody():
     p = subprocess.run(["ffmpeg", "-v", "error", "-i",
                         "/var/cache/zoneminder/testsrc/a.mp4",
@@ -648,6 +663,10 @@ def background_scan():
     scanned = force_event(ids[0])
     if not scanned:
         bad("nothing recorded")
+    # Events left open by a killed zmc hold the scan back on purpose; close the
+    # ones this container collected so the check measures the scan, not them.
+    zmapi.sql("UPDATE Events SET EndDateTime=StartDateTime WHERE EndDateTime IS NULL"
+              " AND Id < %s" % zmapi.quote(scanned["id"]))
     os.makedirs(os.path.dirname(HIGHWATER), exist_ok=True)
     with open(HIGHWATER, "w") as fh:
         fh.write(str(int(scanned["id"]) - 1))

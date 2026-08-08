@@ -37,7 +37,10 @@ def available():
 
 def _pixels(jpeg):
     """The picture as 416x416 BGR floats, decoded by ffmpeg (already a dep)."""
-    p = subprocess.run(["ffmpeg", "-v", "error", "-i", "-", "-vf", "scale=416:416",
+    # -frames:v 1: ZoneMinder's snapshot can carry more than one image, and a
+    # two-frame answer used to fail the size check below and read as "nobody".
+    p = subprocess.run(["ffmpeg", "-v", "error", "-i", "-", "-frames:v", "1",
+                        "-vf", "scale=416:416",
                         "-pix_fmt", "bgr24", "-f", "rawvideo", "-"],
                        input=jpeg, capture_output=True, timeout=30)
     if p.returncode or len(p.stdout) != 416 * 416 * 3:

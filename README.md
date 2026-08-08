@@ -170,7 +170,7 @@ producing "Somebody".
 Porchlight runs on Debian and Ubuntu.
 
 ```sh
-sudo apt install ./porchlight_2.3_all.deb
+sudo apt install ./porchlight_2.3.1_all.deb
 porchlight
 ```
 
@@ -209,7 +209,7 @@ recordings, same database, linked from the System page.
 ### Development
 
 ```sh
-./build.sh                 # builds porchlight_2.3_all.deb
+./build.sh                 # builds porchlight_2.3.1_all.deb
 python3 test_api.py        # pure-logic checks, prints "ok"
 python3 e2e_drive.py       # full end-to-end run, needs a working ZoneMinder
 python3 shots.py OUTDIR    # demo data + the screenshots above (needs Xvfb)
@@ -217,8 +217,8 @@ python3 tools/make_icon.py porchlight.png logo48.png   # redraws the app icon
 ```
 
 The camera footage in the screenshots is freely licensed video from Wikimedia Commons
-(CC BY / public domain): three street scenes in Ljubljana and a house garden full of
-birds in Maracay.
+(CC BY / public domain / CC BY-SA 4.0): three street scenes in Ljubljana, and a German
+shepherd in a garden by Shadster.
 
 Two dead projects shaped this round. **zmeventnotification** (archived) is where the
 `detected:person(96%)` convention and MQTT event publishing come from, and
