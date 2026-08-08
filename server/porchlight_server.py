@@ -24,6 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import detect
+import find
+import mqtt
 import zmapi
 
 PORT = int(os.environ.get("PORCHLIGHT_PORT", "8321"))
@@ -320,7 +322,13 @@ def h_events(q):
     out = []
     for e in r.get("events", []):
         ev = e["Event"]
+        # ponytail: "somebody was seen" is post-filtered here rather than sent
+        # as a LIKE term -- 1.36's event index takes exact values only.
+        person = (ev.get("Notes") or "").startswith("detected:")
+        if q.get("people") in ("1", 1, "true") and not person:
+            continue
         out.append({
+            "person": person, "notes": ev.get("Notes") or "",
             "id": ev["Id"], "monitor": ev.get("MonitorId"), "name": ev.get("Name"),
             "start": ev.get("StartTime"), "length": ev.get("Length"),
             "frames": ev.get("Frames"), "alarm": ev.get("AlarmFrames"),
@@ -582,6 +590,63 @@ def event_dir_ids(path):
     return mid, eid
 
 
+def note_person(eid, conf):
+    """Record what was seen in ZoneMinder's own Notes field.
+
+    The wording is zmeventnotification's ("detected:person(96%)"), so
+    ZoneMinder's console and zmNinja show it the way their users expect.
+    """
+    if not eid:
+        return
+    try:
+        zmapi.sql("UPDATE Events SET Notes=%s WHERE Id=%s"
+                  % (zmapi.quote("detected:person(%d%%)" % round(conf * 100)),
+                     zmapi.quote(eid)))
+    except Exception:
+        pass                                  # never let bookkeeping stop an alert
+
+
+def mqtt_publish(suffix, payload, retain=False):
+    """Fire-and-forget publish under the configured topic. Never raises."""
+    cfg = (load_config().get("mqtt") or {})
+    if not cfg.get("broker"):
+        return False
+    try:
+        return mqtt.publish(cfg["broker"], (cfg.get("topic") or "porchlight") + suffix,
+                            json.dumps(payload) if not isinstance(payload, str) else payload,
+                            cfg.get("user") or None, cfg.get("password") or None,
+                            retain=retain)
+    except Exception:
+        return False
+
+
+def mqtt_event(payload):
+    mqtt_publish("/event/%s" % (payload.get("monitor") or "0"), payload)
+
+
+def h_mqtt(_):
+    cfg = (load_config().get("mqtt") or {})
+    return {"broker": cfg.get("broker", ""), "user": cfg.get("user", ""),
+            "topic": cfg.get("topic", "porchlight"),
+            "has_password": bool(cfg.get("password"))}
+
+
+def h_mqtt_save(body):
+    cfg = load_config()
+    mq = dict(cfg.get("mqtt") or {})
+    mq["broker"] = (body.get("broker") or "").strip()
+    mq["user"] = body.get("user") or ""
+    mq["topic"] = (body.get("topic") or "porchlight").strip("/") or "porchlight"
+    if body.get("password"):
+        mq["password"] = body["password"]
+    cfg["mqtt"] = mq
+    save_config(cfg)
+    if not mq["broker"]:
+        return {"ok": True, "off": True}
+    ok = mqtt_publish("/status", "online", retain=True)
+    return {"ok": ok, "error": "" if ok else "The broker did not answer."}
+
+
 def h_push(body):
     """One alert, decided here. Loopback only; phones never reach this."""
     topic = re.sub(r"[^A-Za-z0-9_-]", "_", body.get("topic") or "")
@@ -590,22 +655,25 @@ def h_push(body):
     server = body.get("server") or zmapi.NTFY_SERVER
     now = time.time()
     cfg = load_config()
-    if now < cfg.get("snooze_until", 0):
-        return {"ok": True, "skipped": "snoozed"}
     mid, eid = event_dir_ids(body.get("dir"))
-    if mid and now - _push_last.get(mid, 0) < 60:
-        return {"ok": True, "skipped": "cooldown"}
+    snoozed_now = now < cfg.get("snooze_until", 0)
+    cooling = bool(mid) and now - _push_last.get(mid, 0) < 60
+    if (snoozed_now or cooling) and not (cfg.get("mqtt") or {}).get("broker"):
+        return {"ok": True, "skipped": "snoozed" if snoozed_now else "cooldown"}
 
     title, message, priority, jpeg = "Camera alert", body.get("message") or "", 3, None
     when = time.strftime("%H:%M")
+    cause, score = "", 0
     if eid:
         try:
             ev = zmapi.api("events/%s.json" % eid)["event"]["Event"]
             names = {str(m["Id"]): m.get("Name") for m in monitors()}
             title = names.get(str(ev.get("MonitorId")), title)
             when = (ev.get("StartTime") or "")[11:16] or when
-            message = "%s at %s" % (ev.get("Cause") or "Movement", when)
-            if float(ev.get("MaxScore") or 0) >= 50:
+            cause = ev.get("Cause") or "Movement"
+            score = float(ev.get("MaxScore") or 0)
+            message = "%s at %s" % (cause, when)
+            if score >= 50:
                 priority = 4
         except Exception:
             pass
@@ -613,19 +681,33 @@ def h_push(body):
 
     # No snapshot means nobody can tell who is there: alert anyway (fail open)
     # rather than let a broken snapshot pipeline silence the phone.
+    person = 0.0
     if jpeg and detect.available():
         conf, box = detect.person(jpeg)
+        person = conf
         if conf:
             priority = 5
             message = "Somebody seen at %s" % when
+            note_person(eid, conf)
             if box and body.get("dir") and os.path.isdir(body["dir"]):
                 try:
                     # ZoneMinder's event pages pick this file up by name.
                     detect.draw_box(jpeg, box, os.path.join(body["dir"], "objdetect.jpg"))
                 except Exception:
                     pass                      # event dirs belong to www-data
-        elif mid and mid in (cfg.get("people_only") or []):
-            return {"ok": True, "skipped": "no person"}
+
+    # Home automation wants every event; the gates below exist to spare the
+    # phone, not the house.
+    mqtt_event({"camera": title, "monitor": mid, "event": eid, "cause": cause,
+                "person": bool(person), "score": score, "when": when})
+
+    if snoozed_now:
+        return {"ok": True, "skipped": "snoozed"}
+    if cooling:
+        return {"ok": True, "skipped": "cooldown"}
+    if not person and jpeg and detect.available() \
+            and mid and mid in (cfg.get("people_only") or []):
+        return {"ok": True, "skipped": "no person"}
 
     click = lan_url() + "/#recordings" if cfg.get("lan") else ""
     ok = send_ntfy(server, topic, title, message or "Something moved",
@@ -825,7 +907,7 @@ def watchdog():
     """Cameras that should be capturing but aren't get one phone alert after
     two consecutive misses, and one more when they come back."""
     ensure_disk_guard()
-    down, told = {}, set()
+    down, told, said = {}, set(), {}
     while True:
         time.sleep(WATCHDOG_INTERVAL)
         try:
@@ -837,6 +919,12 @@ def watchdog():
             m = row["Monitor"]
             mid = str(m["Id"])
             status = zmapi.monitor_status(m, row.get("Monitor_Status") or {})
+            if said.get(mid) != status:
+                said[mid] = status
+                # Retained, so a home automation box that subscribes later
+                # still learns which cameras are alive.
+                mqtt_publish("/camera/%s/status" % mid,
+                             "online" if status == "ok" else status, retain=True)
             if status == "offline":
                 down[mid] = down.get(mid, 0) + 1
                 if down[mid] == 2 and mid not in told:
@@ -867,6 +955,168 @@ def h_timeline(q):
                          "WHERE %s GROUP BY 1" % " AND ".join(where)):
         hours[int(row[0])] = int(row[1])
     return {"hours": hours}
+
+
+# --- long jobs ---------------------------------------------------------------
+# The day summary and the search both take minutes of ffmpeg. One at a time,
+# progress polled by the page that asked for it.
+# ponytail: a single slot, no queue -- these are things a person starts by hand.
+
+CACHE = os.path.expanduser("~/.cache/porchlight")
+
+_job = {"kind": "", "running": False, "progress": 0, "result": None, "error": ""}
+
+
+def start_job(kind, fn):
+    if _job["running"]:
+        return False
+    _job.update(kind=kind, running=True, progress=0, result=None, error="")
+
+    def work():
+        try:
+            _job["result"] = fn(lambda p: _job.update(progress=int(p)))
+        except Exception as e:
+            _job["error"] = describe(e)
+        _job["running"] = False
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
+def h_job(_):
+    return {k: _job[k] for k in ("kind", "running", "progress", "result", "error")}
+
+
+def day_events(day, camera):
+    """Every recording of one day, oldest first."""
+    where = ["StartDateTime >= %s" % zmapi.quote(day + " 00:00:00"),
+             "StartDateTime <= %s" % zmapi.quote(day + " 23:59:59")]
+    if camera:
+        where.append("MonitorId = %s" % zmapi.quote(camera))
+    return [r[0] for r in zmapi.sql("SELECT Id FROM Events WHERE %s ORDER BY StartDateTime"
+                                    % " AND ".join(where))]
+
+
+def event_video_url(eid):
+    """ZoneMinder's own address for a recording, for server-side ffmpeg."""
+    return zmapi._with_token("%s/index.php?view=view_video&eid=%s" % (zmapi.ZM_WEB, eid))
+
+
+def summary_path(day, camera):
+    return os.path.join(CACHE, "summary-%s-%s.mp4" % (day, camera or "all"))
+
+
+def sweep_cache():
+    """A week of summaries is plenty; they are cheap to build again."""
+    cutoff = time.time() - 7 * 86400
+    for name in os.listdir(CACHE):
+        p = os.path.join(CACHE, name)
+        if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+            os.remove(p)
+
+
+def build_summary(day, camera, progress):
+    """The day's recordings, sped up and stitched into one short video."""
+    os.makedirs(CACHE, exist_ok=True)
+    sweep_cache()
+    ids = day_events(day, camera)
+    if not ids:
+        raise RuntimeError("Nothing was recorded that day.")
+    work = os.path.join(CACHE, "parts")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    parts = []
+    for i, eid in enumerate(ids):
+        # Transport-stream parts, because concat can only copy streams that
+        # start cleanly; mp4 parts refuse to be glued.
+        part = os.path.join(work, "%s.ts" % eid)
+        p = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", event_video_url(eid),
+                            # One size for every part: concat can only copy
+                            # streams that agree on resolution.
+                            "-vf", "setpts=PTS/8,scale=1280:720:"
+                                   "force_original_aspect_ratio=decrease,"
+                                   "pad=1280:720:-1:-1",
+                            "-r", "30", "-an", "-c:v", "libx264",
+                            "-crf", "28", "-preset", "veryfast",
+                            "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part],
+                           capture_output=True, timeout=600)
+        if not p.returncode and os.path.getsize(part) > 0:
+            parts.append(part)
+        progress(100 * (i + 1) / (len(ids) + 1))
+    if not parts:
+        raise RuntimeError("None of that day's recordings could be read.")
+    listing = os.path.join(work, "list.txt")
+    with open(listing, "w") as fh:
+        fh.write("".join("file '%s'\n" % p for p in parts))
+    out = summary_path(day, camera)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0",
+                    "-i", listing, "-c", "copy", "-movflags", "+faststart", out],
+                   capture_output=True, timeout=600, check=True)
+    shutil.rmtree(work, ignore_errors=True)
+    progress(100)
+    return {"url": "/api/summary/file?day=%s&camera=%s" % (day, camera or ""),
+            "events": len(parts)}
+
+
+def h_summary(q):
+    """Ready file, or a job building one. Poll this until it stops building."""
+    day = q.get("day") or time.strftime("%Y-%m-%d")
+    camera = q.get("camera") or ""
+    if os.path.isfile(summary_path(day, camera)):
+        return {"building": False,
+                "url": "/api/summary/file?day=%s&camera=%s" % (day, camera)}
+    if _job["kind"] == "summary" and not _job["running"] and _job["error"]:
+        error, _job["error"] = _job["error"], ""
+        return {"building": False, "error": error}
+    if not _job["running"]:
+        start_job("summary", lambda p: build_summary(day, camera, p))
+    return {"building": True, "progress": _job["progress"]}
+
+
+# --- find something in the recordings -----------------------------------------
+
+def run_find(eid, box, camera, days, progress):
+    template = find.template_from(snapshot_jpeg(eid) or b"", box)
+    if template is None:
+        raise RuntimeError("That picture could not be read.")
+    ids = []
+    for back in range(int(days)):
+        day = time.strftime("%Y-%m-%d", time.localtime(time.time() - back * 86400))
+        ids += day_events(day, camera)
+    seen = []
+    for i, other in enumerate(ids):
+        try:
+            hits = find.search_event(event_video_url(other), template)
+        except Exception:
+            hits = []
+        if hits:
+            seen.append({"id": other, "at": hits[0][0], "score": hits[0][1],
+                         "video": zmapi.video_url(other),
+                         "replay": zmapi.event_replay_url(other)})
+        progress(100 * (i + 1) / max(len(ids), 1))
+    times = []
+    for s in seen:
+        try:
+            row = zmapi.sql("SELECT StartTime FROM Events WHERE Id=%s" % zmapi.quote(s["id"]))
+            s["start"] = row[0][0] if row else ""
+            times.append(s["start"])
+        except Exception:
+            s["start"] = ""
+    if not seen:
+        verdict = "Not seen in any of those recordings."
+    else:
+        verdict = "Last seen %s." % (max(times)[11:16] if times else "in the newest recording")
+    return {"verdict": verdict, "seen": seen, "scanned": len(ids)}
+
+
+def h_find(body):
+    if not find.available():
+        return {"ok": False, "error": "Searching needs the optional detector package."}
+    if _job["running"]:
+        return {"ok": False, "error": "Something else is still running."}
+    box = [float(v) for v in body["box"]]
+    start_job("find", lambda p: run_find(body["id"], box, body.get("camera") or "",
+                                         body.get("days") or 1, p))
+    return {"ok": True}
 
 
 # --- viewing from a phone -----------------------------------------------------
@@ -922,6 +1172,8 @@ GET_ROUTES = {
     "rules": h_rules, "configs": h_configs, "states": h_states, "users": h_users,
     "scan": h_scan_result, "webcams": h_webcams, "logs": h_logs,
     "access": h_access, "session": h_session, "timeline": h_timeline,
+    "mqtt": h_mqtt, "summary": h_summary, "job": h_job,
+    "smart": lambda q: {"detect": detect.available(), "find": find.available()},
     "modes": lambda q: [{"value": v, "label": l} for v, l in zmapi.MODES],
     "zonetypes": lambda q: [{"value": v, "label": l} for v, l in zmapi.ZONE_TYPES],
     "zonefields": lambda q: [{"name": n, "label": l, "options": o}
@@ -940,7 +1192,7 @@ POST_ROUTES = {
     "ptz": h_ptz, "restart": h_restart, "test-email": h_test_email,
     "test-push": h_test_push, "access/save": h_access_save, "signin": h_signin,
     "push": h_push, "snooze": h_snooze, "camera/people-only": h_people_only,
-    "share": h_share,
+    "share": h_share, "mqtt/save": h_mqtt_save, "find": h_find,
 }
 
 # What a phone may touch before it has signed in: the app shell and the sign-in
@@ -996,6 +1248,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.share_page(u.path[len("/share/"):])
         if u.path == "/api/backup":
             return self.send_backup()
+        if u.path == "/api/summary/file":
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+            return self.send_summary(summary_path(q.get("day") or "", q.get("camera") or ""))
         if u.path.startswith("/api/"):
             fn = GET_ROUTES.get(u.path[5:])
             if not fn:
@@ -1092,6 +1347,19 @@ class Handler(BaseHTTPRequestHandler):
         data = page.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_summary(self, path):
+        """The built day summary. ponytail: whole file, no Range -- it is small
+        and the player only ever plays it start to end."""
+        if os.path.dirname(path) != CACHE or not os.path.isfile(path):
+            return self.send_json({"error": "not built yet"}, 404)
+        with open(path, "rb") as fh:
+            data = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp4")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

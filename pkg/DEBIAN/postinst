@@ -41,6 +41,10 @@ if mysqladmin ping >/dev/null 2>&1; then
     # nobody sees when the pictures are embedded in our own UI.
     mysql -e "update \`${DBNAME:-zm}\`.Config set Value='0' where Name='ZM_SHOW_PRIVACY';" \
         >/dev/null 2>&1 || true
+    # Rules (and so phone alerts) only run as often as this; 20 seconds is a
+    # long time to wait for "somebody is at the door".
+    mysql -e "update \`${DBNAME:-zm}\`.Config set Value='5' where Name='ZM_FILTER_EXECUTE_INTERVAL';" \
+        >/dev/null 2>&1 || true
     zmupdate.pl -f >/dev/null 2>&1 || true
 else
     # Never fail the install over this - the app's "Fix it" button retries.

@@ -753,7 +753,7 @@ async function drawTimeline() {
     })));
 }
 
-["#rec-camera", "#rec-date", "#rec-cause", "#rec-kept", "#rec-sort"].forEach((s) =>
+["#rec-camera", "#rec-date", "#rec-cause", "#rec-kept", "#rec-sort", "#rec-people"].forEach((s) =>
   $(s).addEventListener("change", () => {
     recPage = 1;
     if (s === "#rec-camera" || s === "#rec-date") recHour = null;
@@ -771,6 +771,7 @@ async function loadRecordings(reset) {
   const params = {
     camera: $("#rec-camera").value, cause: $("#rec-cause").value,
     archived: $("#rec-kept").checked ? "1" : "", page: recPage,
+    people: $("#rec-people").checked ? "1" : "",
     sort: $("#rec-sort").value,
     from: hh ? base + " " + hh + ":00:00" : (day ? day + " 00:00:00" : ""),
     to: hh ? base + " " + hh + ":59:59" : (day ? day + " 23:59:59" : ""),
@@ -792,7 +793,8 @@ function recCard(e) {
     el("img", { class: "thumb", src: e.thumb, alt: "", loading: "lazy",
                 onclick: () => playEvent(e) }),
     el("div", { class: "body" },
-      el("div", { class: "title" }, (cam ? cam.name : "Camera " + e.monitor)),
+      el("div", { class: "title" }, (cam ? cam.name : "Camera " + e.monitor),
+        e.person && el("span", { class: "badge" }, "Somebody")),
       el("div", { class: "muted" }, e.start + " · " + Math.round(Number(e.length || 0)) + "s"
         + (e.cause ? " · " + e.cause : "")
         + (Number(e.score) ? " · activity " + e.score : "")),
@@ -807,6 +809,7 @@ function recCard(e) {
             toast("Link copied. Anyone with it can watch this recording for 3 days.");
           } catch (err) { fail(err); }
         } }, "Share"),
+        el("button", { onclick: () => findModal(e) }, "Find this"),
         el("button", { onclick: async () => {
           try { await post("event/action", { id: e.id, action: e.archived ? "unkeep" : "keep" });
             toast(e.archived ? "No longer kept." : "Kept forever."); loadRecordings(true); }
@@ -828,6 +831,87 @@ function playEvent(e) {
   viewer(video, el("div", { class: "bar" },
     el("span", { style: "color:#ddd" }, e.start),
     el("button", { onclick: closeViewer }, "Close")));
+}
+
+// --- the whole day in one short video ---------------------------------------
+
+$("#rec-summary").addEventListener("click", async () => {
+  const day = $("#rec-date").value || today();
+  const camera = $("#rec-camera").value;
+  const msg = el("p", {}, "Reading the day's recordings...");
+  modal(el("h2", {}, "Your day in a minute"), msg,
+    el("p", { class: "hint" }, "Every recording of " + day + ", sped up and joined "
+      + "together. The first build takes a while; after that it is instant."),
+    el("div", { class: "row" }, el("button", { onclick: closeModal }, "Close")));
+  for (;;) {
+    let r;
+    try { r = await get("summary", { day: day, camera: camera }); }
+    catch (e) { msg.textContent = e.message; return; }
+    if (r.error) { msg.textContent = r.error; return; }
+    if (!r.building) {
+      closeModal();
+      return viewer(el("video", { src: r.url, controls: true, autoplay: true }),
+        el("div", { class: "bar" }, el("span", { style: "color:#ddd" }, day),
+          el("button", { onclick: closeViewer }, "Close")));
+    }
+    msg.textContent = "Building... " + (r.progress || 0) + "%";
+    await new Promise((ok) => setTimeout(ok, 2000));
+  }
+});
+
+// --- find one thing across the recordings -----------------------------------
+
+function findModal(e) {
+  // Drag a rectangle over the thing, then search the recordings for it.
+  const img = el("img", { src: e.thumb, alt: "", style: "max-width:100%;display:block" });
+  const box = el("div", { class: "findbox hidden" });
+  const wrap = el("div", { class: "findwrap" }, img, box);
+  const days = el("select", {},
+    el("option", { value: "1" }, "Today"), el("option", { value: "3" }, "Last 3 days"));
+  const out = el("p", { class: "hint" }, "Drag a rectangle around the thing.");
+  let a = null, sel = null;
+  const at = (ev) => {
+    const r = img.getBoundingClientRect();
+    return [(ev.clientX - r.left) / r.width, (ev.clientY - r.top) / r.height];
+  };
+  wrap.addEventListener("pointerdown", (ev) => { a = at(ev); ev.preventDefault(); });
+  wrap.addEventListener("pointermove", (ev) => {
+    if (!a) return;
+    const b = at(ev);
+    sel = [Math.min(a[0], b[0]), Math.min(a[1], b[1]),
+           Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])];
+    box.classList.remove("hidden");
+    box.style.cssText = "left:" + sel[0] * 100 + "%;top:" + sel[1] * 100
+      + "%;width:" + sel[2] * 100 + "%;height:" + sel[3] * 100 + "%";
+  });
+  wrap.addEventListener("pointerup", () => { a = null; });
+
+  modal(el("h2", {}, "Find this"), wrap,
+    el("div", { class: "row" },
+      el("label", {}, "Search ", days),
+      el("button", { class: "primary", onclick: () => start() }, "Search"),
+      el("button", { onclick: closeModal }, "Close")),
+    out);
+
+  async function start() {
+    if (!sel || sel[2] < 0.02 || sel[3] < 0.02) return toast("Drag a rectangle first.", true);
+    const r = await post("find", { id: e.id, box: sel, camera: e.monitor, days: days.value });
+    if (!r.ok) return toast(r.error, true);
+    for (;;) {
+      const j = await get("job");
+      if (j.error) { out.textContent = j.error; return; }
+      if (!j.running && j.result) {
+        out.replaceChildren(el("strong", {}, j.result.verdict),
+          el("div", { class: "muted" }, "Looked through " + j.result.scanned + " recordings."),
+          ...j.result.seen.map((s) => el("div", { class: "item" },
+            el("span", {}, (s.start || "") + " · " + s.at + "s in"),
+            el("button", { onclick: () => playEvent(s) }, "Play"))));
+        return;
+      }
+      out.textContent = "Searching... " + (j.progress || 0) + "%";
+      await new Promise((ok) => setTimeout(ok, 1500));
+    }
+  }
 }
 
 // --- page: rules ------------------------------------------------------------
@@ -1163,6 +1247,11 @@ PAGES.system = async function () {
   $("#lan-on").checked = access.lan;
   $("#lan-url").textContent = access.url || "(no network address yet)";
 
+  const mq = await get("mqtt");
+  $("#mqtt-broker").value = mq.broker || "";
+  $("#mqtt-topic").value = mq.topic || "porchlight";
+  $("#mqtt-user").value = mq.user || "";
+
   const cfg = await get("configs");
   const byName = Object.fromEntries(cfg.map((c) => [c.name, c]));
   $("#sys-simple").replaceChildren(...SIMPLE_SETTINGS.filter(([k]) => byName[k]).map(([k, label]) =>
@@ -1221,6 +1310,19 @@ $("#restore-file").addEventListener("change", async (e) => {
     PAGES.system().catch(() => {});
   } catch (err) { $("#restore-msg").textContent = "Failed: " + err.message; }
   e.target.value = "";
+});
+
+$("#mqtt-save").addEventListener("click", async () => {
+  const msg = $("#mqtt-msg");
+  msg.textContent = "Saving...";
+  try {
+    const r = await post("mqtt/save", {
+      broker: $("#mqtt-broker").value, topic: $("#mqtt-topic").value,
+      user: $("#mqtt-user").value, password: $("#mqtt-pw").value,
+    });
+    $("#mqtt-pw").value = "";
+    msg.textContent = r.off ? "Turned off." : (r.ok ? "Connected." : r.error);
+  } catch (e) { msg.textContent = e.message; }
 });
 
 $("#btn-restart").addEventListener("click", restart);

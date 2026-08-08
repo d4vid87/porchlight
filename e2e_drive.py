@@ -571,6 +571,10 @@ check("test pattern shows nobody", test_pattern_is_nobody)
 
 
 def people_only_skips():
+    global server
+    server.kill()                 # a fresh process forgets the alert cooldown
+    server.wait(timeout=10)
+    server = start_server({"PORCHLIGHT_WATCHDOG": "600"})
     call("camera/people-only", {"id": ids[0], "on": True})
     r = push_form({"topic": "e2e-person", "server": NTFY, "dir": push_dir})
     call("camera/people-only", {"id": ids[0], "on": False})
@@ -579,6 +583,221 @@ def people_only_skips():
 
 
 check("people-only camera skips person-free events", people_only_skips)
+
+
+def notes_written():
+    """What was seen goes into ZoneMinder's own Notes field, ES's wording."""
+    import porchlight_server                     # noqa: E402
+    porchlight_server.note_person(push_ev["id"], 0.96)
+    rows = zmapi.sql("SELECT Notes FROM Events WHERE Id=%s" % zmapi.quote(push_ev["id"]))
+    if not rows or not rows[0][0].startswith("detected:person("):
+        bad(str(rows))
+
+
+check("detection is written into the recording", notes_written)
+
+
+def people_filter():
+    tagged = get("events", {"people": "1"})["events"]
+    if not any(str(e["id"]) == str(push_ev["id"]) for e in tagged):
+        bad("tagged event missing from the people-only list")
+    if not all(e["person"] for e in tagged):
+        bad("untagged event in the people-only list")
+
+
+check("recordings can be narrowed to people", people_filter)
+
+# --- alerts as fast as ZoneMinder allows -------------------------------------
+
+check("rules run every 5 seconds", lambda: same(
+    (zmapi.sql("SELECT Value FROM Config WHERE Name='ZM_FILTER_EXECUTE_INTERVAL'")
+     or [["?"]])[0][0], "5"))
+
+# --- MQTT --------------------------------------------------------------------
+
+print("home automation")
+mqtt_msgs = []
+
+
+def fake_broker(sock):
+    while True:
+        conn, _ = sock.accept()
+        threading.Thread(target=broker_session, args=(conn,), daemon=True).start()
+
+
+def mqtt_length(data, i):
+    """MQTT's variable-length integer: (value, index after it) or (None, i)."""
+    n, mult = 0, 1
+    while i < len(data):
+        b = data[i]
+        i += 1
+        n += (b & 0x7F) * mult
+        if not b & 0x80:
+            return n, i
+        mult *= 128
+    return None, i
+
+
+def broker_session(conn):
+    with conn:
+        conn.settimeout(10)
+        data = b""
+        try:
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                while data:
+                    kind = data[0] & 0xF0
+                    n, start = mqtt_length(data, 1)
+                    if n is None or len(data) < start + n:
+                        break
+                    body = data[start:start + n]
+                    if kind == 0x10:
+                        conn.sendall(b"\x20\x02\x00\x00")     # CONNACK, accepted
+                    elif kind == 0x30:
+                        tlen = (body[0] << 8) | body[1]
+                        mqtt_msgs.append({"topic": body[2:2 + tlen].decode(),
+                                          "payload": body[2 + tlen:].decode(),
+                                          "retain": bool(data[0] & 1)})
+                    data = data[start + n:]
+        except Exception:
+            pass
+
+
+import socket  # noqa: E402
+
+_broker = socket.socket()
+_broker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+_broker.bind(("127.0.0.1", 8398))
+_broker.listen(5)
+threading.Thread(target=fake_broker, args=(_broker,), daemon=True).start()
+
+check("broker settings save", lambda: call("mqtt/save", {
+    "broker": "127.0.0.1:8398", "topic": "e2e"})["ok"] or bad("broker refused"))
+check("settings read back", lambda: same(get("mqtt")["broker"], "127.0.0.1:8398"))
+
+
+def event_published():
+    n = len(mqtt_msgs)
+    push_form({"topic": "e2e-mqtt", "server": NTFY, "dir": push_dir})
+    for _ in range(20):
+        if len(mqtt_msgs) > n:
+            break
+        time.sleep(0.5)
+    if len(mqtt_msgs) <= n:
+        bad("nothing reached the broker")
+    m = mqtt_msgs[-1]
+    if not m["topic"].startswith("e2e/event/"):
+        bad(m["topic"])
+    body = json.loads(m["payload"])
+    if str(body.get("event")) != str(push_ev["id"]) or "person" not in body:
+        bad(m["payload"])
+
+
+check("events reach the broker", event_published)
+
+
+def broker_down_still_alerts():
+    call("mqtt/save", {"broker": "127.0.0.1:1"})     # nothing listening
+    n = len(ntfy_hits)
+    # Another camera, so the per-camera cooldown from the test above is out of
+    # the way.
+    other = "/var/cache/zoneminder/events/%s/2026-01-01/999999" % ids[1]
+    r = push_form({"topic": "e2e-push", "server": NTFY, "dir": other})
+    if len(ntfy_hits) == n:
+        bad("a dead broker silenced the phone: " + str(r))
+    call("mqtt/save", {"broker": ""})
+
+
+check("a dead broker never silences the phone", broker_down_still_alerts)
+
+# --- the day in a minute ------------------------------------------------------
+
+print("day summary")
+
+
+import porchlight_server as ps  # noqa: E402
+
+
+def summary_stitches():
+    """The build itself, on clips this container can actually decode: the
+    recordings ZoneMinder writes here carry no decodable frames."""
+    clips = []
+    for i in range(2):
+        c = "/tmp/e2e-sum%d.mp4" % i
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                        "-i", "testsrc2=size=640x360:rate=10", "-t", "16",
+                        "-pix_fmt", "yuv420p", c], capture_output=True, check=True)
+        clips.append(c)
+    day, camera = "1999-01-01", "e2e"
+    old_days, old_url = ps.day_events, ps.event_video_url
+    ps.day_events = lambda d, c: ["0", "1"]
+    ps.event_video_url = lambda eid: clips[int(eid)]
+    try:
+        out = ps.build_summary(day, camera, lambda p: None)
+    finally:
+        ps.day_events, ps.event_video_url = old_days, old_url
+    if out["events"] != 2:
+        bad(str(out))
+    path = ps.summary_path(day, camera)
+    dur = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                          "-of", "csv=p=0", path], capture_output=True, text=True).stdout
+    if not dur.strip() or not 2 < float(dur) < 16:
+        bad("32s of recordings became %r" % dur.strip())
+    os.remove(path)
+
+
+check("a day of recordings stitches into a short video", summary_stitches)
+
+
+def summary_endpoint():
+    r = get("summary", {"day": "1998-01-01", "camera": ids[0]})
+    if not r.get("building"):
+        bad(str(r))
+    for _ in range(30):
+        r = get("summary", {"day": "1998-01-01", "camera": ids[0]})
+        if not r.get("building"):
+            break
+        time.sleep(1)
+    if r.get("error") != "Nothing was recorded that day.":
+        bad(str(r))
+
+
+check("an empty day says so instead of hanging", summary_endpoint)
+
+# --- find something -----------------------------------------------------------
+
+print("find")
+import find  # noqa: E402
+
+
+def finds_a_plant():
+    """A white square painted into a clip is found; a bare corner is not."""
+    if not find.available():
+        bad("numpy missing in this container")
+    clip = "/tmp/e2e-find.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "testsrc2=size=640x360:rate=5", "-t", "20",
+                    # A shape with edges inside it: a plain white block has no
+                    # detail to match on.
+                    "-vf", "drawbox=x=400:y=60:w=90:h=70:color=white@1:t=fill:"
+                           "enable='gte(t,10)',"
+                           "drawbox=x=420:y=80:w=30:h=30:color=black@1:t=fill:"
+                           "enable='gte(t,10)'",
+                    "-pix_fmt", "yuv420p", clip], capture_output=True, check=True)
+    frames = find.frames_of(clip)
+    if len(frames) < 15:
+        bad("only %d frames" % len(frames))
+    template = frames[15][int(0.194 * find.H):int(0.333 * find.H),
+                          int(0.64 * find.W):int(0.75 * find.W)]
+    hits = [i for i, f in enumerate(frames) if find.score(f, template) >= find.THRESHOLD]
+    if len(hits) < 8 or min(hits) < 9:
+        bad("hits %s" % hits[:6])
+
+
+check("a planted object is found only after it appears", finds_a_plant)
 
 # --- run states --------------------------------------------------------------
 

@@ -80,6 +80,8 @@
           </select>
         </label>
         <label class="check"><input type="checkbox" id="rec-kept"> Kept forever only</label>
+        <label class="check"><input type="checkbox" id="rec-people"> People only</label>
+        <button id="rec-summary">Your day in a minute</button>
       </div>
     </header>
     <div id="rec-timeline" class="timeline"></div>
@@ -171,6 +173,24 @@
       </div>
       <p class="hint">On your phone's browser, go to <strong><span id="lan-url">—</span></strong>,
         then use “Add to Home Screen” to keep it one tap away.</p>
+    </div>
+    <h2>Home automation</h2>
+    <div class="card pad">
+      <p class="hint">Porchlight can announce every event on an MQTT broker, so Home
+        Assistant (or anything else on your network) can react to it. Leave the broker
+        empty to keep this off.</p>
+      <div class="fields">
+        <label>Broker <input id="mqtt-broker" placeholder="192.168.1.10:1883"></label>
+        <label>Topic <input id="mqtt-topic" placeholder="porchlight"></label>
+        <label>Username <input id="mqtt-user" placeholder="(optional)"></label>
+        <label>Password <input type="password" id="mqtt-pw" placeholder="(unchanged)"></label>
+      </div>
+      <div class="row">
+        <button id="mqtt-save" class="primary">Save</button>
+        <span id="mqtt-msg" class="muted"></span>
+      </div>
+      <p class="hint">Events arrive on <code>topic/event/&lt;camera&gt;</code> and camera
+        health on <code>topic/camera/&lt;camera&gt;/status</code>.</p>
     </div>
     <h2>Backup</h2>
     <div class="card pad">

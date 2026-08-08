@@ -136,6 +136,9 @@ button.link { border: none; background: none; color: var(--accent); padding: 4px
   background: var(--chip); color: var(--ink);        /* opaque: text over video needs its own box */
 }
 .badge.live { background: var(--good); color: #06210f; font-weight: 600; }
+/* Badges normally float over a picture; the one beside a recording's name sits
+   in the line of text with it. */
+.title .badge { position: static; margin-left: 8px; vertical-align: middle; }
 .badge.bad { background: var(--bad); color: #fff; font-weight: 600; }
 .card .foot { display: flex; gap: 8px; align-items: center; padding: 10px 12px; }
 .card .foot select { flex: 1 1 0; min-width: 0; }
@@ -225,3 +228,7 @@ details summary { cursor: pointer; color: var(--accent); margin: 10px 0; }
 .timeline .cell.sel { outline: 2px solid var(--accent); outline-offset: 1px; opacity: 1 !important; }
 
 #snooze-bar { margin: 0 0 14px; }
+
+/* Drag-a-rectangle picker for "Find this". */
+.findwrap { position: relative; touch-action: none; user-select: none; cursor: crosshair; }
+.findbox { position: absolute; border: 2px solid var(--accent); background: rgba(255,255,255,.15); }

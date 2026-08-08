@@ -34,8 +34,18 @@
   free, open-source [ntfy](https://ntfy.sh) app: an unguessable topic name, no account,
   a snapshot of the moment in the notification, and snooze buttons for noisy evenings.
   Point it at your own ntfy server and even the snapshot never leaves home.
+- **Alerts in about five seconds.** Porchlight tunes ZoneMinder to check its rules
+  every five seconds instead of every twenty, so the phone rings while whoever it is
+  is still on the step.
 - **It tells you when it's broken.** A camera that stops answering rings your phone —
   and rings again when it's back. Old recordings make room before the disk fills.
+- **Your whole day in a minute.** One button turns a day of recordings into a single
+  short video, so you can see what happened while you were out without scrubbing
+  through a list.
+- **Find when something went missing.** Draw a rectangle around the bike, the parcel,
+  the car — Porchlight searches the recordings and tells you when it was last there.
+- **Works with Home Assistant.** Every event can be published to your MQTT broker,
+  camera health included, so the rest of your house can react to it.
 - **Watch from your phone.** Open the app to your home Wi-Fi — off by default, always
   password-protected — and save it to your phone's home screen like an installed app.
 - **Plain language, expert power.** Everyday tasks read like sentences; every ZoneMinder
@@ -52,6 +62,9 @@
 | Person detection | subscription | subscription | subscription | included, on your CPU |
 | Recording history | cloud, 180 days | cloud, 30–60 days | cloud, 14 days | your disk, your rules |
 | Works with the internet down | no | no | no | yes |
+| Daily activity summary | subscription | subscription | — | included |
+| Search footage for an object | — | — | — | included |
+| Home automation (MQTT) | — | — | — | included |
 | Footage leaves your house | always | always | always | never |
 
 ## A tour
@@ -80,8 +93,15 @@ through them. Click a picture to fill the screen with it.
 
 A 24-hour strip shows when things happened; click an hour to jump straight to it.
 Filter by camera, day, motion or continuous, and kept-forever; sort newest first or
-most movement first. Click to play, save the clip, keep it forever, or **Share** it —
-an expiring three-day link anyone can watch without your password.
+most movement first, or narrow the list to **People only** — recordings where the
+detector actually saw somebody wear a "Somebody" badge. Click to play, save the clip,
+keep it forever, or **Share** it — an expiring three-day link anyone can watch without
+your password.
+
+**Your day in a minute** stitches the day's recordings into one sped-up video.
+**Find this** on any recording lets you drag a rectangle around something and search
+the last day or three for it: "Last seen 14:32" beats scrubbing through an evening
+of clips.
 
 ![Recordings](docs/screenshots/recordings.png)
 
@@ -98,6 +118,11 @@ with a snapshot of the moment attached. A person in the picture makes the alert
 urgent; a per-camera setting can skip person-free alerts entirely. If a camera stops
 answering, your phone hears about that too. Email settings and a test button live on
 the same page.
+
+What the detector saw is written into ZoneMinder's own record as
+`detected:person(96%)`, plus an outlined `objdetect.jpg` — the wording
+[zmeventnotification](https://github.com/ZoneMinder/zmeventnotification) established,
+so ZoneMinder's console and zmNinja show it the way their users expect.
 
 ![Rules](docs/screenshots/rules.png)
 
@@ -119,6 +144,11 @@ Health, storage, restart, a one-file **backup** of cameras, rules and settings (
 the button that restores it on a fresh install), the common settings in plain English,
 and every ZoneMinder option in a searchable expert table.
 
+**Home automation** publishes every event to an MQTT broker as
+`porchlight/event/<camera>` (camera name, event id, whether somebody was seen) and
+camera health as a retained `porchlight/camera/<camera>/status`, which is all Home
+Assistant needs to make sensors out of your cameras.
+
 **Watch from your phone** opens the app to your home network. It is off by default;
 turning it on requires a password, and every request that does not come from this
 computer has to sign in with it. The page shows the address to type on your phone,
@@ -135,7 +165,7 @@ over a live snapshot for motion zones and privacy masks.
 Porchlight runs on Debian and Ubuntu.
 
 ```sh
-sudo apt install ./porchlight_2.1_all.deb
+sudo apt install ./porchlight_2.2_all.deb
 porchlight
 ```
 
@@ -158,6 +188,10 @@ screen.
 - `web/` — vanilla HTML, CSS and JavaScript. No build step, no dependencies.
 - `admin/porchlight-admin` — the only privileged code, reached through polkit with a
   fixed list of subcommands.
+- `server/find.py` — the object search: grayscale normalized cross-correlation over
+  one frame per second, computed with numpy FFTs and integral images. No OpenCV.
+- `server/mqtt.py` — 60 lines of MQTT 3.1.1 over a plain socket: connect, publish,
+  disconnect. No broker library.
 - `push.sh` — ZoneMinder filters run it per event; it hands the event to the local
   server, which applies cooldown, snooze and the person check before posting to ntfy.
   If the server isn't running it still sends a bare alert by itself.
@@ -170,13 +204,19 @@ recordings, same database, linked from the System page.
 ### Development
 
 ```sh
-./build.sh                 # builds porchlight_2.1_all.deb
+./build.sh                 # builds porchlight_2.2_all.deb
 python3 test_api.py        # pure-logic checks, prints "ok"
 python3 e2e_drive.py       # full end-to-end run, needs a working ZoneMinder
 python3 shots.py OUTDIR    # demo data + the screenshots above (needs Xvfb)
 python3 tools/make_icon.py porchlight.png logo48.png   # redraws the app icon
 ```
 
-The camera footage in the screenshots is public-domain video from Wikimedia
-Commons: a home security camera on Prince Edward Island, a snowy bird feeder,
-a suburban driveway at night, and a US Fish & Wildlife trail camera.
+The camera footage in the screenshots is freely licensed video from Wikimedia Commons
+(CC BY / public domain): three street scenes in Ljubljana and a house garden full of
+birds in Maracay.
+
+Two dead projects shaped this round. **zmeventnotification** (archived) is where the
+`detected:person(96%)` convention and MQTT event publishing come from, and
+**zmMagik** (archived, GPL-2.0) is where "your day in a minute" and "find this" come
+from. Porchlight reimplements those ideas on its own stack — Perl daemons, OpenCV and
+YOLO weights don't belong in a small .deb — and copies no code from either.

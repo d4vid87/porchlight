@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build porchlight_2.1_all.deb
+# Build porchlight_2.2_all.deb
 set -e
 cd "$(dirname "$0")"
 
@@ -16,6 +16,7 @@ cp pkg/DEBIAN/control build/DEBIAN/
 install -m 755 pkg/DEBIAN/postinst build/DEBIAN/postinst
 install -m 755 launcher.sh build/usr/bin/porchlight
 install -m 644 server/zmapi.py server/porchlight_server.py server/detect.py \
+        server/find.py server/mqtt.py \
         build/usr/share/porchlight/server/
 install -m 644 models/nanodet-plus-m-416.onnx build/usr/share/porchlight/models/
 install -m 644 pkg/copyright build/usr/share/doc/porchlight/copyright
@@ -28,5 +29,5 @@ install -m 644 admin/com.porchlight.policy build/usr/share/polkit-1/actions/com.
 install -m 644 porchlight.desktop build/usr/share/applications/porchlight.desktop
 install -m 644 porchlight.png build/usr/share/icons/hicolor/256x256/apps/porchlight.png
 
-dpkg-deb --root-owner-group --build build porchlight_2.1_all.deb
-echo "built porchlight_2.1_all.deb"
+dpkg-deb --root-owner-group --build build porchlight_2.2_all.deb
+echo "built porchlight_2.2_all.deb"
