@@ -1,4 +1,5 @@
 build/
+build-deb/
 dist/
 *.deb
 __pycache__/

@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-version=2.3.1
+version=2.3.2
 tool_url=https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
 tool_sha=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
 tmp=$(mktemp -d)

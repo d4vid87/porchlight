@@ -170,7 +170,7 @@ producing "Somebody".
 Porchlight runs on Debian and Ubuntu.
 
 ```sh
-sudo apt install ./porchlight_2.3.1_all.deb
+sudo apt install ./porchlight_2.3.2_all.deb
 porchlight
 ```
 
@@ -209,7 +209,7 @@ recordings, same database, linked from the System page.
 ### Development
 
 ```sh
-./build.sh                 # builds porchlight_2.3.1_all.deb
+./build.sh                 # builds porchlight_2.3.2_all.deb
 python3 test_api.py        # pure-logic checks, prints "ok"
 python3 e2e_drive.py       # full end-to-end run, needs a working ZoneMinder
 python3 shots.py OUTDIR    # demo data + the screenshots above (needs Xvfb)
