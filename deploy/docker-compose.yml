@@ -16,7 +16,10 @@ services:
       - database:/var/lib/mysql
 
   zoneminder:
-    image: ghcr.io/zoneminder-containers/zoneminder-base:1.38.4
+    build:
+      context: .
+      dockerfile: Dockerfile.zoneminder
+    image: porchlight-zoneminder:1.38.4
     restart: unless-stopped
     stop_grace_period: 45s
     depends_on:

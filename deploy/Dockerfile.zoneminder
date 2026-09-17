@@ -1,0 +1,4 @@
+FROM ghcr.io/zoneminder-containers/zoneminder-base:1.38.4
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libcurl3-gnutls \
+    && rm -rf /var/lib/apt/lists/*
