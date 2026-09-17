@@ -1,4 +1,5 @@
 build/
+dist/
 *.deb
 __pycache__/
 /screenshots/
