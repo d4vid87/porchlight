@@ -1,0 +1,42 @@
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: zm
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - database:/var/lib/mysql
+
+  zoneminder:
+    image: ghcr.io/zoneminder-containers/zoneminder-base:1.38.4
+    restart: unless-stopped
+    stop_grace_period: 45s
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:8082:80
+    environment:
+      MYSQL_HOST: db
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: ${TZ:-America/Chicago}
+    shm_size: 1gb
+    volumes:
+      - recordings:/data
+      - config:/config
+      - logs:/log
+
+volumes:
+  database:
+  recordings:
+  config:
+  logs:

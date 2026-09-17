@@ -85,8 +85,22 @@ def _with_token(url):
 def api(path, data=None, method=None):
     """Call the ZoneMinder API. data is a dict of form fields, or None for GET."""
     url = _with_token("%s/%s" % (ZM_API, path.lstrip("/")))
-    body = urllib.parse.urlencode(data, doseq=True).encode() if data is not None else None
-    req = urllib.request.Request(url, data=body, method=method)
+    headers = {}
+    body = None
+    if data is not None:
+        nested = {}
+        for key, value in data.items():
+            match = re.fullmatch(r"([^[]+)\[([^]]+)\]", key)
+            if not match:
+                nested = None
+                break
+            nested.setdefault(match.group(1), {})[match.group(2)] = value
+        if nested is not None:
+            body = json.dumps(nested).encode()
+            headers["Content-Type"] = "application/json"
+        else:
+            body = urllib.parse.urlencode(data, doseq=True).encode()
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=20) as r:
         text = r.read().decode()
     return json.loads(text) if text.strip() else {}
@@ -199,6 +213,7 @@ def monitor_fields(name, url, function, prefix="Monitor"):
         "Type": "Ffmpeg",
         "Function": function,
         "Enabled": "1",
+        "Device": "",
         "Path": url,
         "Method": "rtpRtsp",
         "Width": "1920",

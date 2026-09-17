@@ -216,7 +216,9 @@ def h_camera_add(body):
     fields.update({"Monitor[%s]" % k: str(v) for k, v in src.items()})
     if kind != "rtsp":
         fields.pop("Monitor[Method]", None)
-    zmapi.api("monitors.json", data=fields)
+    result = zmapi.api("monitors.json", data=fields)
+    if result.get("message") != "Saved":
+        raise ValueError("ZoneMinder rejected the camera: %s" % result.get("message", "unknown error"))
     # ZoneMinder answers {"message":"Saved"} with no id, so find the row we just made.
     mine = [m for m in monitors() if m.get("Name") == name]
     new_id = max((int(m["Id"]) for m in mine), default=None)
