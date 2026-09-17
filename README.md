@@ -17,7 +17,7 @@
   <img alt="Video: 100% local" src="https://img.shields.io/badge/video-100%25%20local-brightgreen">
 </p>
 
-![The Cameras page](docs/screenshots/cameras.png)
+![Porchlight camera overview, live view, and focused camera player](docs/assets/hero-camera.gif)
 
 ## Why Porchlight
 
