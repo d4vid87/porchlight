@@ -30,13 +30,16 @@ function streamSrc(url, scale) {
             .replace(/scale=\d+/, "scale=" + scale)
             .replace(/maxfps=\d+/, "maxfps=" + (FPS[scale] || 10));
 }
-function killStreams(node) { $$("img", node).forEach((i) => { i.src = ""; }); }
+function killStreams(node) {
+  $$("img", node).forEach((i) => i.removeAttribute("src"));
+  $$("video", node).forEach((v) => { v.pause(); v.removeAttribute("src"); v.load(); });
+}
 
 async function get(path, params = {}) {
   const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== "" && v !== undefined));
   const r = await fetch("/api/" + path + (q.toString() ? "?" + q : ""));
   const j = await r.json();
-  if (j && j.error) throw new Error(j.error);
+  if (!r.ok || j?.error) throw new Error(j?.error || "Request failed (" + r.status + ")");
   return j;
 }
 
@@ -45,7 +48,7 @@ async function post(path, body = {}) {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   const j = await r.json();
-  if (j && j.error) throw new Error(j.error);
+  if (!r.ok || j?.error || j?.ok === false) throw new Error(j?.error || j?.out || "Changes were not saved.");
   return j;
 }
 
@@ -62,23 +65,57 @@ function toast(msg, bad = false) {
 const fail = (e) => toast(e.message || String(e), true);
 const gb = (n) => (n / 1073741824).toFixed(0);
 
+let modalOrigin;
+let modalBusy = false;
 function modal(...content) {
   const body = $("#modal-body");
+  if ($("#modal").classList.contains("hidden")) modalOrigin = document.activeElement;
+  killStreams(body);
+  body.className = "sheet";
+  $("#modal").dataset.dirty = "";
   body.replaceChildren(...content);
   $("#modal").classList.remove("hidden");
+  requestAnimationFrame(() => ($("input, select, button", body) || $("#modal")).focus());
   return body;
 }
-function closeModal() { $("#modal").classList.add("hidden"); killStreams($("#modal-body")); $("#modal-body").replaceChildren(); }
+function closeModal() {
+  const shell = $("#modal");
+  if (modalBusy) return;
+  if (shell.dataset.dirty && !confirm("Discard unsaved changes?")) return;
+  shell.dataset.dirty = "";
+  shell.classList.add("hidden");
+  killStreams($("#modal-body"));
+  $("#modal-body").replaceChildren();
+  modalOrigin?.focus();
+  return true;
+}
 $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
 
+let viewerOrigin;
 function viewer(...content) {
   const v = $("#viewer");
+  viewerOrigin = document.activeElement;
+  killStreams(v);
   v.replaceChildren(...content);
   v.classList.remove("hidden");
+  ($("button", v) || v).focus();
 }
-function closeViewer() { const v = $("#viewer"); v.classList.add("hidden"); killStreams(v); v.replaceChildren(); }
+function closeViewer() { const v = $("#viewer"); v.classList.add("hidden"); killStreams(v); v.replaceChildren(); viewerOrigin?.focus(); }
 $("#viewer").addEventListener("click", (e) => { if (e.target.id === "viewer") closeViewer(); });
-addEventListener("keydown", (e) => { if (e.key === "Escape") { closeViewer(); closeModal(); } });
+addEventListener("keydown", (e) => {
+  const active = [$("#viewer"), $("#modal")].find((n) => !n.classList.contains("hidden"));
+  if (!active) return;
+  if (e.key === "Escape") { active.id === "viewer" ? closeViewer() : closeModal(); }
+  if (e.key === "Tab") {
+    const controls = $$("button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href], [tabindex='0']", active).filter((n) => n.getClientRects().length);
+    const first = controls[0] || active, last = controls.at(-1) || active;
+    if (!active.contains(document.activeElement) || (e.shiftKey && document.activeElement === first)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+});
+addEventListener("beforeunload", (e) => {
+  if ($("#modal").dataset.dirty || Object.keys(configDraft).length) { e.preventDefault(); e.returnValue = ""; }
+});
 
 // --- shared state -----------------------------------------------------------
 
@@ -95,13 +132,21 @@ function modeSelect(value, onchange) {
 
 const PAGES = {};
 
-$$("#topnav a").forEach((a) => a.addEventListener("click", () => { location.hash = a.dataset.page; }));
+$$("#topnav a").forEach((a) => {
+  a.href = "#" + a.dataset.page;
+  a.setAttribute("aria-label", [...a.childNodes].filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.textContent).join("").trim());
+  $(".nav-icon", a)?.setAttribute("aria-hidden", "true");
+});
 addEventListener("hashchange", () => show(location.hash.slice(1) || "cameras"));
 
 function show(name) {
+  if (!PAGES[name]) name = "cameras";
+  if (!$("#modal").classList.contains("hidden") && !closeModal()) {
+    history.replaceState(null, "", "#" + state.page); return;
+  }
   state.page = name;
   if (location.hash.slice(1) !== name) location.hash = name;
-  $$("#topnav a").forEach((a) => a.classList.toggle("active", a.dataset.page === name));
+  $$("#topnav a").forEach((a) => { a.classList.toggle("active", a.dataset.page === name); a.setAttribute("aria-current", a.dataset.page === name ? "page" : "false"); });
   $$(".page").forEach((p) => p.classList.toggle("hidden", p.id !== "page-" + name));
   stopLive(name !== "live");
   if (PAGES[name]) PAGES[name]().catch(fail);
@@ -112,7 +157,7 @@ function show(name) {
 // stylesheet loads, so the page never flashes the wrong colours.
 
 function paintTheme() {
-  $("#theme-btn").textContent = document.documentElement.dataset.theme === "dark" ? "Light" : "Dark";
+  $("#theme-btn").textContent = document.documentElement.dataset.theme === "dark" ? "☀  Light appearance" : "☾  Dark appearance";
 }
 
 $("#theme-btn").addEventListener("click", () => {
@@ -162,15 +207,30 @@ $("#btn-live").addEventListener("click", () => { location.hash = "live"; });
 PAGES.cameras = async function () {
   const grid = $("#camera-grid");
   if (!state.cameras.length) grid.replaceChildren(el("p", { class: "muted" }, "Loading..."));
-  const [cams, status] = await Promise.all([get("cameras"), get("status")]);
+  let cams, status;
+  try { [cams, status] = await Promise.all([get("cameras"), get("status")]); }
+  catch (e) {
+    grid.replaceChildren(el("div", { class: "card pad" }, el("h2", {}, "Camera system unavailable"), el("p", { class: "hint" }, "Check the connection in Settings → Diagnostics, then try again."), el("button", { onclick: () => PAGES.cameras().catch(fail) }, "Try again")));
+    $("#recent-activity")?.replaceChildren();
+    return;
+  }
   state.cameras = cams;
+  $("#camera-count").textContent = cams.filter((c) => c.status === "ok").length + " of " + cams.length + " online";
   drawTiles(status);
   drawSnooze(status);
   if (!cams.length) {
     grid.replaceChildren(welcomeCard());
+    $("#recent-activity").replaceChildren(el("p", { class: "hint" }, "Add a camera to start recording activity."));
     return;
   }
   grid.replaceChildren(...cams.map(cameraCard));
+  try {
+    const recent = await get("events", { limit: 4 });
+    $("#recent-activity").replaceChildren(...(recent.events.length ? recent.events.map((e) => {
+      const camera = cams.find((c) => String(c.id) === String(e.monitor));
+      return el("button", { class: "activity-row", onclick: () => playEvent(e) }, el("img", { src: e.thumb, alt: "", loading: "lazy" }), el("span", {}, el("strong", {}, camera?.name || "Camera"), el("small", {}, e.person ? "Person detected" : e.animal ? "Animal detected" : "Movement recorded")), el("time", {}, e.start), el("span", { "aria-hidden": "true" }, "↗"));
+    }) : [el("p", { class: "hint" }, "No recordings yet. New activity will appear here.")]));
+  } catch { $("#recent-activity").textContent = "Recent activity is unavailable."; }
   cameraTimer();
 };
 
@@ -180,7 +240,8 @@ function cameraTimer() {
   clearInterval(state.cameraTimer);
   state.cameraTimer = setInterval(() => {
     if (state.page !== "cameras") return clearInterval(state.cameraTimer);
-    if ($(".modal") || $(".viewer") || $("details.menu[open]")) return;
+    if (!$("#modal").classList.contains("hidden") || !$("#viewer").classList.contains("hidden")
+        || $("details.menu[open]")) return;
     PAGES.cameras().catch(() => {});
   }, 60000);
 }
@@ -213,14 +274,19 @@ function ago(t) {
 }
 
 function cameraCard(c) {
-  const badge = c.status === "ok" ? el("span", { class: "badge live" }, "Live")
+  const stamp = el("span", { class: "snapshot-time" }, "Loading snapshot…");
+  const badge = c.status === "ok" ? el("span", { class: "badge live" }, "Online")
     : c.status === "offline" ? el("span", { class: "badge bad" }, "Offline")
     : el("span", { class: "badge" }, "Off · " + ago(c.last));
   // A stopped monitor answers the snapshot URL with no body, so don't ask for one.
   const preview = c.status === "ok"
     ? el("div", { class: "preview" },
         el("img", { class: "thumb", src: c.snapshot, alt: c.name, loading: "lazy",
-          onclick: () => watch(c) }), badge)
+          tabindex: "0", role: "button", "aria-label": "Watch " + c.name,
+          onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); watch(c); } },
+          onload: () => { stamp.textContent = "Snapshot · " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); },
+          onerror: () => { stamp.textContent = "Snapshot unavailable"; },
+          onclick: () => watch(c) }), badge, stamp)
     : el("div", { class: "preview off" },
         c.status === "offline" ? "Can't reach this camera." : "This camera is turned off.", badge);
 
@@ -236,7 +302,7 @@ function cameraCard(c) {
       el("span", { class: "dot " + (c.status === "ok" ? "on" : c.status === "offline" ? "off" : "") }),
       el("span", {}, c.name),
       el("span", { class: "spacer" }),
-      el("button", { class: "gear", title: "Settings", onclick: () => cameraSettings(c.id) }, "⚙")),
+      el("button", { class: "gear", title: "Settings", "aria-label": "Settings for " + c.name, onclick: () => cameraSettings(c.id).catch(fail) }, "Settings ↗")),
     preview,
     el("div", { class: "foot" },
       modeSelect(c.function, async (e) => {
@@ -252,7 +318,7 @@ document.addEventListener("click", (e) => {
 
 function drawTiles(s) {
   const tile = (onclick, label, ...body) =>
-    el("div", { class: "card pad tile", onclick },
+    el("div", { class: "card pad tile", role: "button", tabindex: "0", onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onclick(); } }, onclick },
       el("div", { class: "muted" }, label), ...body);
   const gb = (n) => (n / 1e9).toFixed(0) + " GB";
   const st = s.storage || {};
@@ -260,7 +326,7 @@ function drawTiles(s) {
   $("#tiles").replaceChildren(
     tile(() => { location.hash = "modes"; }, "Home / Away",
       el("div", { class: "big" }, s.state || "—")),
-    tile(() => { location.hash = "system"; }, "Storage",
+    tile(() => { selectSettings("storage"); location.hash = "system"; }, "Storage",
       el("div", { class: "bar-track" },
         el("div", { class: "bar-fill",
           style: "width:" + pct + "%" + (pct >= 90 ? ";background:var(--bad)" : "") })),
@@ -268,7 +334,7 @@ function drawTiles(s) {
         + (pct >= 90 ? " — running low" : "") : "—")),
     tile(() => { location.hash = "recordings"; }, "Recordings today",
       el("div", { class: "big" }, s.today == null ? "—" : String(s.today))),
-    tile(() => { location.hash = "system"; }, "System health",
+    tile(() => { selectSettings("diagnostics"); location.hash = "system"; }, "System health",
       s.ok ? el("div", {}, "ZoneMinder " + s.version)
            : el("div", {}, "Not running ",
                el("button", { class: "link", onclick: (e) => { e.stopPropagation(); restart(); } }, "Fix it"))));
@@ -447,66 +513,184 @@ const BASIC = ["Name", "Function", "Enabled"];
 const CONNECTION = ["Type", "Path", "Device", "Host", "Port", "Method", "User", "Pass"];
 const VIDEO = ["Width", "Height", "MaxFPS", "AlarmMaxFPS", "VideoWriter", "RecordAudio", "Colours"];
 const MOTION = ["AlarmFrameCount", "PreEventCount", "PostEventCount", "SectionLength",
-  "EventPrefix", "AnalysisFPS", "LinkedMonitors"];
+  "EventPrefix", "AnalysisFPS", "AnalysisFPSLimit", "RefBlendPerc", "AlarmRefBlendPerc", "LinkedMonitors"];
 const CONTROL = ["Controllable", "ControlId", "ControlDevice", "ControlAddress"];
+
+const FIELD_LABELS = {
+  Name: "Camera name", Function: "Recording mode", Enabled: "Camera enabled",
+  Type: "Connection type", Path: "Source path", Device: "Device", Host: "Host",
+  Port: "Port", Method: "Connection method", User: "Username", Pass: "Password",
+  Width: "Frame width", Height: "Frame height", MaxFPS: "Maximum capture rate",
+  AlarmMaxFPS: "Maximum alarm rate", VideoWriter: "Video writer", RecordAudio: "Record audio",
+  Colours: "Colour channels", AlarmFrameCount: "Alarm frame count",
+  PreEventCount: "Frames before motion", PostEventCount: "Frames after motion",
+  SectionLength: "Recording section length", EventPrefix: "Event name prefix",
+  AnalysisFPS: "Analysis frame rate", LinkedMonitors: "Linked cameras",
+  AnalysisFPSLimit: "Analysis frame rate limit", RefBlendPerc: "Reference image blend", AlarmRefBlendPerc: "Alarm reference blend",
+  Controllable: "PTZ enabled", ControlId: "Control profile", ControlDevice: "Control device",
+  ControlAddress: "Control address",
+};
+const FIELD_UNITS = { Width: "px", Height: "px", MaxFPS: "fps", AlarmMaxFPS: "fps", AnalysisFPS: "fps", AnalysisFPSLimit: "fps", AlarmFrameCount: "frames", PreEventCount: "frames", PostEventCount: "frames", SectionLength: "seconds", RefBlendPerc: "%", AlarmRefBlendPerc: "%" };
 
 async function cameraSettings(id) {
   const data = await get("camera", { id });
+  if (!state.zoneFields) state.zoneFields = await get("zonefields");
   const m = data.monitor;
   const edited = {};
+  let dirty = false;
+  const dirtyNote = el("span", { class: "dirty-note" }, "No unsaved changes");
+  const apply = el("button", { class: "primary", disabled: true }, "Apply changes");
+  const changed = () => {
+    dirty = true;
+    $("#modal").dataset.dirty = "1";
+    dirtyNote.textContent = "Unsaved changes";
+    apply.disabled = false;
+    if (replay?.children.length) testStatus.textContent = "Settings changed since this replay. Test again to preview the current draft.";
+  };
+  const label = (k, control) => el("label", {},
+    el("span", { class: "field-name" }, FIELD_LABELS[k] || k),
+    el("span", { class: "field-key" }, k + (FIELD_UNITS[k] ? " · " + FIELD_UNITS[k] : "")), control);
   const field = (k) => {
     const cur = m[k] === null || m[k] === undefined ? "" : String(m[k]);
     if (k === "Function") {
-      const s = modeSelect(cur, (e) => { edited.Function = e.target.value; });
-      return el("label", {}, "What it does", s);
+      const s = modeSelect(cur, (e) => { edited.Function = e.target.value; changed(); });
+      return label(k, s);
     }
-    const input = el("input", { value: cur, oninput: (e) => { edited[k] = e.target.value; } });
-    return el("label", {}, k, input);
+    const input = el("input", { type: k === "Pass" ? "password" : "text", value: cur, oninput: (e) => { edited[k] = e.target.value; changed(); } });
+    return label(k, input);
   };
   const pane = (keys) => el("div", { class: "fields" }, keys.filter((k) => k in m).map(field));
   const rest = Object.keys(m).filter((k) =>
     !["Id"].includes(k) && ![...BASIC, ...CONNECTION, ...VIDEO, ...MOTION, ...CONTROL].includes(k));
 
-  // ponytail: sensitivity is per-zone pixel counts in ZoneMinder, so it can't be read
-  // back as one word -- the select only writes.
-  let sensitivity = null;
+  const zoneDraft = {};
   const motion = pane(MOTION);
-  motion.prepend(el("label", {}, "Sensitivity (all watched areas)",
-    el("select", { onchange: (e) => { sensitivity = e.target.value; } },
-      el("option", { value: "" }, "Leave as it is"),
-      ["Low", "Normal", "High"].map((s) => el("option", { value: s }, s)))));
+  for (const zone of data.zones) {
+    motion.append(el("fieldset", { class: "zone-settings" }, el("legend", {}, zone.Name),
+      el("div", { class: "fields" }, state.zoneFields.map((f) => {
+        const input = f.options
+          ? el("select", {}, f.options.map((v) => el("option", { value: v }, v)))
+          : el("input", { type: "number", min: 0, step: "any" });
+        input.value = zone[f.name] ?? "";
+        input.addEventListener("input", () => {
+          (zoneDraft[zone.Id] ||= {})[f.name] = input.value;
+          changed();
+        });
+        return el("label", {}, f.label, el("span", { class: "field-key" }, f.name), input);
+      }))));
+  }
+  const testStatus = el("p", { class: "hint", role: "status" }, "Checking the isolated motion worker…");
+  const replay = el("div", {});
+  const test = el("button", { disabled: true }, "Test unsaved settings");
+  motion.prepend(el("div", { class: "motion-test card pad" },
+    el("strong", {}, "Preview motion detection"),
+    el("p", { class: "hint" }, "Capture a 10-second sample at 10 fps and replay it with your draft thresholds in an isolated ZoneMinder engine. Live recording and alerts stay unchanged. Connection, video and recording-mode edits are not part of this test."),
+    test, testStatus, replay));
+  get("motion/capability").then((c) => {
+    test.disabled = !c.available || !data.zones.length;
+    testStatus.textContent = !data.zones.length ? "Create a watched area first." : c.available ? "Ready · ZoneMinder " + c.engine : c.reason;
+  }).catch((e) => { testStatus.textContent = e.message; });
+  test.addEventListener("click", async () => {
+    test.disabled = true;
+    killStreams(replay); replay.replaceChildren();
+    const tested = JSON.stringify({ monitor: edited, zones: zoneDraft });
+    try {
+      const monitor = Object.fromEntries(Object.entries(edited).filter(([k]) =>
+        ["AlarmFrameCount", "PreEventCount", "PostEventCount", "AnalysisFPS", "AnalysisFPSLimit", "RefBlendPerc", "AlarmRefBlendPerc"].includes(k)));
+      let job = await post("motion/test", { id, monitor, zones: zoneDraft });
+      while (["capturing", "analysing"].includes(job.state)) {
+        testStatus.textContent = job.state === "capturing" ? "Capturing a fresh 10-second sample…" : "Analysing your sample in isolation…";
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (!body.isConnected || $("#modal").classList.contains("hidden") || !body.contains(preview)) return;
+        job = await get("motion/status", { id: job.id });
+      }
+      if (job.state !== "ready") throw new Error(job.error || "Motion test failed.");
+      replay.append(el("video", { controls: true, playsinline: true, src: "/api/motion/file?id=" + job.id, "aria-label": "Motion test replay with detection overlays" }));
+      testStatus.textContent = job.alarm_frames + " of " + job.frames + " frames triggered detection. Highlighted areas show where ZoneMinder detected motion. " +
+        (tested !== JSON.stringify({ monitor: edited, zones: zoneDraft }) ? "Settings changed during the test; test again to preview the latest draft." : "These settings have not been applied.");
+    } catch (e) { testStatus.textContent = e.message; }
+    finally { test.disabled = false; }
+  });
   let peopleOnly = null;
   if (data.smart) {
     motion.prepend(el("label", { class: "check" },
       el("input", { type: "checkbox", checked: !!data.people_only,
-        onchange: (e) => { peopleOnly = e.target.checked; } }),
+        onchange: (e) => { peopleOnly = e.target.checked; changed(); } }),
       "Alert my phone only when somebody is seen"));
   }
 
   const tabs = { "Basics": pane(BASIC), "Connection": pane(CONNECTION), "Video": pane(VIDEO),
-    "Motion": motion, "Control": pane(CONTROL), "Everything else": pane(rest) };
+    "Motion": motion, "Control": pane(CONTROL), "Advanced": pane(rest) };
+  let selectedTab = "Basics";
   const holder = el("div", {});
+  const search = el("input", { type: "search", placeholder: "Find a camera setting…", "aria-label": "Search camera settings" });
+  search.addEventListener("input", () => {
+    const query = search.value.trim().toLowerCase();
+    for (const tab of Object.values(tabs)) {
+      $$("label", tab).forEach((field) => field.classList.toggle("hidden", !!query && !field.textContent.toLowerCase().includes(query)));
+    }
+    holder.replaceChildren(...(query ? Object.values(tabs) : [tabs[selectedTab]]));
+  });
   const bar = el("div", { class: "tabs" }, Object.keys(tabs).map((name, i) =>
     el("button", { class: i === 0 ? "active" : "", onclick: (e) => {
+      selectedTab = name;
+      search.value = "";
+      Object.values(tabs).forEach((tab) => $$("label", tab).forEach((field) => field.classList.remove("hidden")));
       $$(".tabs button", bar).forEach((b) => b.classList.remove("active"));
       e.target.classList.add("active");
       holder.replaceChildren(tabs[name]);
     } }, name)));
   holder.replaceChildren(tabs["Basics"]);
 
-  modal(el("h2", {}, "Settings for " + m.Name), bar, holder,
-    el("div", { class: "row" },
-      el("button", { onclick: () => zoneEditor(id) }, "Edit watched areas"),
-      el("span", { style: "flex:1" }),
-      el("button", { onclick: closeModal }, "Cancel"),
-      el("button", { class: "primary", onclick: async () => {
-        try {
-          if (sensitivity) await post("camera/sensitivity", { id, level: sensitivity });
-          if (peopleOnly !== null) await post("camera/people-only", { id, on: peopleOnly });
-          await post("camera/save", Object.assign({ id }, edited));
-          closeModal(); toast("Saved."); PAGES.cameras();
-        } catch (e) { fail(e); }
-      } }, "Save")));
+  apply.addEventListener("click", async () => {
+    modalBusy = true;
+    const controls = Object.values(tabs).flatMap((tab) => $$("input, select, button", tab)).filter((c) => !c.disabled);
+    controls.forEach((c) => { c.disabled = true; });
+    apply.disabled = true;
+    apply.textContent = "Applying…";
+    dirtyNote.textContent = "Saving changes";
+    try {
+      if (Object.keys(edited).length) {
+        await post("camera/save", Object.assign({ id }, edited));
+        Object.keys(edited).forEach((k) => delete edited[k]);
+      }
+      for (const zid of Object.keys(zoneDraft)) {
+        await post("zone/update", { monitor: id, zones: { [zid]: zoneDraft[zid] } });
+        delete zoneDraft[zid];
+      }
+      if (peopleOnly !== null) await post("camera/people-only", { id, on: peopleOnly });
+      dirty = false;
+      $("#modal").dataset.dirty = "";
+      modalBusy = false;
+      closeModal();
+      toast("Camera settings applied.");
+      PAGES.cameras();
+    } catch (e) {
+      dirtyNote.textContent = "Some changes may not have applied — review and try again";
+      apply.textContent = "Try again";
+      apply.disabled = false;
+      fail(e);
+    } finally { modalBusy = false; controls.forEach((c) => { c.disabled = false; }); }
+  });
+
+  const preview = el("div", { class: "settings-preview" },
+    el("div", { class: "pane" },
+      el("img", { src: data.stream, alt: "Live view from " + m.Name })),
+    el("div", { class: "preview-meta" }, el("span", {}, "Live preview"), el("span", {}, m.Width + " × " + m.Height)),
+    el("button", { onclick: () => {
+      if (modalBusy) return;
+      if (dirty && !confirm("Discard unsaved camera changes and edit watched areas?")) return;
+      dirty = false;
+      $("#modal").dataset.dirty = "";
+      zoneEditor(id);
+    } }, "Edit watched areas"));
+  const body = modal(
+    el("div", { class: "settings-head" }, el("p", { class: "eyebrow" }, "Camera settings"), el("h2", {}, m.Name)),
+    el("div", { class: "settings-layout" }, preview,
+      el("div", { class: "settings-fields" }, search, bar, holder)),
+    el("div", { class: "settings-actions" }, dirtyNote,
+      el("button", { onclick: closeModal }, "Cancel"), apply));
+  body.classList.add("settings-sheet");
 }
 
 // --- zone editor ------------------------------------------------------------
@@ -700,7 +884,8 @@ function drawLive() {
       const src = mjpeg ? streamSrc(c.stream, scale)
         : c.snapshot.replace(/scale=\d+/, "scale=" + scale).replace(/rand=\d+/, "rand=" + Date.now());
       panes.push(el("div", { class: "pane" },
-        el("img", { src, alt: c.name, onclick: () => watch(c) }),
+        el("img", { src, alt: c.name, role: "button", tabindex: "0", "aria-label": "Watch " + c.name,
+          onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); watch(c); } }, onclick: () => watch(c) }),
         el("div", { class: "label" }, c.name)));
     }
     grid.replaceChildren(...panes);
@@ -740,8 +925,10 @@ async function drawTimeline() {
                                     day: $("#rec-date").value || today() });
   const max = Math.max(...t.hours, 1);
   $("#rec-timeline").replaceChildren(...t.hours.map((n, h) =>
-    el("div", {
+    el("button", {
       class: "cell" + (recHour === h ? " sel" : ""),
+      "aria-label": String(h).padStart(2, "0") + ":00, " + n + " recordings",
+      "aria-pressed": recHour === h,
       style: "opacity:" + (n ? (0.3 + 0.7 * n / max).toFixed(2) : 0.08),
       title: String(h).padStart(2, "0") + ":00 — " + n + (n === 1 ? " recording" : " recordings"),
       onclick: () => {
@@ -979,7 +1166,7 @@ function ruleModal(r) {
                               value: r.min_frames || "" });
   const cmd = el("input", { placeholder: "/usr/local/bin/my-script", value: r.command || "" });
 
-  modal(el("h2", {}, r.id ? "Edit rule" : "New rule"),
+  const form = modal(el("h2", {}, r.id ? "Edit rule" : "New rule"),
     el("div", { class: "row" }, "When ", what, " on "),
     el("div", { class: "fields" },
       el("label", {}, "these cameras (none = all)", cams),
@@ -990,7 +1177,7 @@ function ruleModal(r) {
       el("label", { class: "check" }, email, "Email me"),
       el("label", { class: "check" }, push, "Send an alert to my phone"),
       el("label", { class: "check" }, keep, "Keep the recording forever")),
-    el("details", {}, el("summary", {}, "Show advanced"),
+    el("details", { open: state.page === "system" }, el("summary", {}, "Technical settings"),
       el("div", { class: "fields" },
         el("label", {}, "Ignore blips with fewer movement frames than (0 = keep all)", blips),
         el("label", {}, "Delete recordings older than (days, 0 = never)", days),
@@ -1013,9 +1200,11 @@ function ruleModal(r) {
             delete_after_days: Number(days.value) || null,
             command: cmd.value.trim() || null,
           });
-          closeModal(); toast("Rule saved."); PAGES.rules();
+          $("#modal").dataset.dirty = "";
+          closeModal(); toast("Rule saved."); PAGES[state.page]();
         } catch (e) { fail(e); }
       } }, "Save rule")));
+  form.addEventListener("input", () => { $("#modal").dataset.dirty = "1"; });
 }
 
 // --- phone alerts (ntfy) ----------------------------------------------------
@@ -1222,6 +1411,39 @@ function userForm(u) {
 }
 
 // --- page: system -----------------------------------------------------------
+let configDraft = {};
+const settingsNames = { advanced: "Advanced", storage: "Storage & backup", diagnostics: "Diagnostics", access: "Remote access", integrations: "Integrations" };
+function selectSettings(name) {
+  $$(".settings-section").forEach((s) => s.classList.toggle("hidden", s.dataset.settings !== name));
+  $$("#settings-nav button").forEach((b) => { b.classList.toggle("active", b.dataset.section === name); b.setAttribute("aria-pressed", b.dataset.section === name); });
+}
+$("#settings-nav").replaceChildren(...Object.entries(settingsNames).map(([key, label]) =>
+  el("button", { "data-section": key, onclick: () => selectSettings(key) }, label)));
+selectSettings("advanced");
+$("#retention-add").addEventListener("click", () => ruleModal({ name: "Recording retention", delete_after_days: 30 }));
+
+function syncConfigDraft() {
+  const n = Object.keys(configDraft).length;
+  $("#cfg-dirty").textContent = n ? n + " unsaved setting" + (n === 1 ? "" : "s") : "No unsaved changes";
+  $("#cfg-apply").disabled = $("#cfg-discard").disabled = !n;
+}
+$("#cfg-discard").addEventListener("click", () => { configDraft = {}; renderConfigs(allConfigs); syncConfigDraft(); });
+$("#cfg-apply").addEventListener("click", async () => {
+  const controls = $$("[data-config], #cfg-discard, #cfg-search");
+  controls.forEach((c) => { c.disabled = true; });
+  $("#cfg-apply").disabled = true;
+  try {
+    for (const [name, value] of Object.entries(configDraft)) {
+      await post("config/set", { name, value });
+      const row = allConfigs.find((c) => c.name === name);
+      if (row) row.value = value;
+      delete configDraft[name];
+    }
+    toast("Settings applied.");
+  } catch (e) { fail(e); }
+  controls.forEach((c) => { c.disabled = false; });
+  renderConfigs(allConfigs); syncConfigDraft();
+});
 
 const SIMPLE_SETTINGS = [
   ["ZM_WEB_REFRESH_MAIN", "How often the camera list refreshes (seconds)"],
@@ -1242,7 +1464,7 @@ PAGES.system = async function () {
       el("div", { class: "bar-track" }, el("div", { class: "bar-fill", style: "width:" + pct + "%" })),
       el("div", { class: "muted" }, s.storage ?
         gb(s.storage.free) + " GB free of " + gb(s.storage.total) + " GB" : ""),
-      el("div", { class: "muted" }, "Old recordings are deleted automatically when space runs low.")));
+      el("div", { class: "muted" }, "Review deletion rules in Storage & backup and check free space regularly.")));
 
   const access = await get("access");
   $("#lan-on").checked = access.lan;
@@ -1258,6 +1480,10 @@ PAGES.system = async function () {
   $("#sys-simple").replaceChildren(...SIMPLE_SETTINGS.filter(([k]) => byName[k]).map(([k, label]) =>
     configRow(byName[k], label)));
   renderConfigs(cfg);
+  const rules = await get("rules");
+  const retention = rules.filter((r) => r.delete_after_days);
+  $("#retention-rules").replaceChildren(...retention.map((r) => el("div", { class: "item" }, el("div", {}, el("strong", {}, r.name), el("p", { class: "hint" }, "Delete unkept recordings after " + r.delete_after_days + " days")), el("button", { onclick: () => ruleModal(r) }, "Edit rule"))));
+  if (!retention.length) $("#retention-rules").textContent = "No time-based retention rules. Check Rules & alerts for any disk-space cleanup filters.";
 };
 
 function configRow(c, label) {
@@ -1266,25 +1492,33 @@ function configRow(c, label) {
   const input = bool
     ? el("input", { type: "checkbox", checked: String(c.value) === "1" })
     : el("input", { value: c.value === null ? "" : c.value });
-  return el("div", { class: "item" },
+  input.setAttribute("aria-label", c.name);
+  input.dataset.config = c.name;
+  const value = Object.hasOwn(configDraft, c.name) ? configDraft[c.name] : c.value;
+  if (bool) input.checked = String(value) === "1";
+  else input.value = value ?? "";
+  input.addEventListener("input", () => {
+    const next = bool ? (input.checked ? "1" : "0") : input.value;
+    if (next === String(c.value ?? "")) delete configDraft[c.name]; else configDraft[c.name] = next;
+    $$("[data-config]").filter((other) => other !== input && other.dataset.config === c.name).forEach((other) => {
+      if (bool) other.checked = input.checked; else other.value = next;
+    });
+    syncConfigDraft();
+  });
+  return el("div", { class: "item config-row" },
     el("div", {}, el("strong", {}, label || c.name),
-      label ? null : el("div", { class: "muted" }, c.prompt || "")),
-    el("div", { class: "row" }, input,
-      el("button", { onclick: async () => {
-        try {
-          const value = bool ? (input.checked ? "1" : "0") : input.value;
-          const r = await post("config/set", { name: c.name, value });
-          toast(r.ok === false ? "Couldn't save: " + (r.out || "").slice(-160) : "Saved.");
-        } catch (e) { fail(e); }
-      } }, "Save")));
+      el("div", { class: "muted" }, label ? c.name : c.prompt || "")),
+    el("div", { class: "row" }, input));
 }
 
 let allConfigs = [];
 function renderConfigs(rows) {
   allConfigs = rows;
+  const byName = Object.fromEntries(rows.map((c) => [c.name, c]));
+  $("#sys-simple").replaceChildren(...SIMPLE_SETTINGS.filter(([k]) => byName[k]).map(([k, label]) => configRow(byName[k], label)));
   const needle = $("#cfg-search").value.toLowerCase();
   const shown = rows.filter((r) => !needle || (r.name + (r.prompt || "")).toLowerCase().includes(needle));
-  $("#cfg-list").replaceChildren(...shown.slice(0, 200).map((c) => configRow(c)));
+  $("#cfg-list").replaceChildren(...shown.map((c) => configRow(c)));
 }
 $("#cfg-search").addEventListener("input", () => renderConfigs(allConfigs));
 

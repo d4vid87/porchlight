@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import detect
 import find
 import mqtt
+import motion
 import zmapi
 
 PORT = int(os.environ.get("PORCHLIGHT_PORT", "8321"))
@@ -169,6 +170,34 @@ def h_camera(q):
             "smart": detect.available(),
             "people_only": str(mid) in (load_config().get("people_only") or []),
             "stream": zmapi.stream_url(mid, scale=60, maxfps=10)}
+
+
+def h_motion_test(body):
+    mid = str(int(body["id"]))
+    version = zmapi.api("host/getVersion.json").get("version", "")
+    cap = motion.capability(version)
+    if not cap["available"]:
+        raise ValueError(cap["reason"])
+    m = zmapi.api("monitors/%s.json" % mid)["monitor"]["Monitor"]
+    data = motion.validate(m, zones_of(mid), body)
+    # Camera credentials/URLs come from saved server state, never caller input.
+    url = zmapi.stream_url(mid, scale=100, maxfps=10)
+    url = zmapi.ZM_WEB + url[len("/zm"):]
+    return motion.start(url, data)
+
+
+def h_motion_capability(_):
+    return motion.capability(zmapi.api("host/getVersion.json").get("version", ""))
+
+
+def h_zone_update(body):
+    mid = str(int(body["monitor"]))
+    zones = zones_of(mid)
+    motion.validate({"Width": 1, "Height": 1}, zones, {"zones": body["zones"]})
+    for zid, fields in body["zones"].items():
+        if fields:
+            zmapi.api("zones/%s.json" % int(zid), method="PUT", data={"Zone[%s]" % k: str(v) for k, v in fields.items()})
+    return {"ok": True}
 
 
 def h_camera_save(body):
@@ -398,7 +427,7 @@ def h_configs(q):
     if needle:
         rows = [r for r in rows if needle in (r.get("Name", "") + r.get("Prompt", "")).lower()]
     return [{"name": r.get("Name"), "value": r.get("Value"), "prompt": r.get("Prompt"),
-             "type": r.get("Type"), "category": r.get("Category")} for r in rows[:400]]
+             "type": r.get("Type"), "category": r.get("Category")} for r in rows]
 
 
 def h_config_set(body):
@@ -1259,6 +1288,8 @@ def h_signin(body):
 
 
 GET_ROUTES = {
+    "motion/capability": h_motion_capability,
+    "motion/status": lambda q: motion.status(q["id"]),
     "status": h_status, "cameras": h_cameras, "camera": h_camera, "events": h_events,
     "rules": h_rules, "configs": h_configs, "states": h_states, "users": h_users,
     "scan": h_scan_result, "webcams": h_webcams, "logs": h_logs,
@@ -1272,6 +1303,7 @@ GET_ROUTES = {
 }
 
 POST_ROUTES = {
+    "motion/test": h_motion_test, "zone/update": h_zone_update,
     "camera/add": h_camera_add, "camera/sample": h_camera_sample,
     "camera/save": h_camera_save, "camera/delete": h_camera_delete,
     "camera/mode": h_camera_mode, "camera/sensitivity": h_sensitivity,
@@ -1288,7 +1320,7 @@ POST_ROUTES = {
 
 # What a phone may touch before it has signed in: the app shell and the sign-in
 # call itself. Everything else needs a session.
-PUBLIC_FILES = {"/", "", "/index.html", "/app.css", "/app.js", "/logo.png", "/manifest.json"}
+PUBLIC_FILES = {"/", "", "/index.html", "/app.css", "/app.js", "/logo.png", "/mark.svg", "/manifest.json"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1342,6 +1374,12 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/summary/file":
             q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
             return self.send_summary(summary_path(q.get("day") or "", q.get("camera") or ""))
+        if u.path == "/api/motion/file":
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                return self.send_video(str(motion.result(q.get("id", [""])[0])))
+            except ValueError as e:
+                return self.send_json({"error": str(e)}, 404)
         if u.path.startswith("/api/"):
             fn = GET_ROUTES.get(u.path[5:])
             if not fn:
@@ -1443,17 +1481,44 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_summary(self, path):
-        """The built day summary. ponytail: whole file, no Range -- it is small
-        and the player only ever plays it start to end."""
+        """Serve only validated summary paths."""
         if os.path.dirname(path) != CACHE or not os.path.isfile(path):
             return self.send_json({"error": "not built yet"}, 404)
-        with open(path, "rb") as fh:
-            data = fh.read()
-        self.send_response(200)
+        return self.send_video(path)
+
+    def send_video(self, path):
+        size = os.path.getsize(path)
+        start, end = 0, size - 1
+        requested = self.headers.get("Range")
+        if requested:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested)
+            if not match or not any(match.groups()):
+                return self.send_json({"error": "invalid byte range"}, 416)
+            lo, hi = match.groups()
+            if lo:
+                start = int(lo)
+                end = min(int(hi), end) if hi else end
+            else:
+                start = max(0, size - int(hi))
+            if start > end or start >= size:
+                return self.send_json({"error": "unsatisfiable byte range"}, 416)
+        self.send_response(206 if requested else 200)
         self.send_header("Content-Type", "video/mp4")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("Accept-Ranges", "bytes")
+        if requested:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
         self.end_headers()
-        self.wfile.write(data)
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            remaining = end - start + 1
+            while remaining:
+                chunk = fh.read(min(65536, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def send_backup(self):
         data = backup_tar()

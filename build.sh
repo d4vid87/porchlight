@@ -16,12 +16,12 @@ cp pkg/DEBIAN/control build/DEBIAN/
 install -m 755 pkg/DEBIAN/postinst build/DEBIAN/postinst
 install -m 755 launcher.sh build/usr/bin/porchlight
 install -m 644 server/zmapi.py server/porchlight_server.py server/detect.py \
-        server/find.py server/mqtt.py \
+        server/find.py server/mqtt.py server/motion.py \
         build/usr/share/porchlight/server/
 install -m 644 models/nanodet-plus-m-416.onnx build/usr/share/porchlight/models/
 install -m 644 pkg/copyright build/usr/share/doc/porchlight/copyright
 install -m 644 models/LICENSE build/usr/share/doc/porchlight/NANODET-LICENSE
-install -m 644 web/index.html web/app.css web/app.js web/manifest.json build/usr/share/porchlight/web/
+install -m 644 web/index.html web/app.css web/app.js web/mark.svg web/manifest.json build/usr/share/porchlight/web/
 install -m 644 logo48.png build/usr/share/porchlight/web/logo.png
 install -m 755 push.sh build/usr/share/porchlight/push.sh
 install -m 755 admin/porchlight-admin build/usr/lib/porchlight/porchlight-admin

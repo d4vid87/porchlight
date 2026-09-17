@@ -4,40 +4,46 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Porchlight</title>
-<link rel="icon" href="logo.png">
+<link rel="icon" href="mark.svg" type="image/svg+xml">
 <link rel="manifest" href="manifest.json">
 <script>document.documentElement.dataset.theme = localStorage.theme || "dark";</script>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 
-<header id="topnav">
-  <div class="brand"><img src="logo.png" alt=""><span>Porchlight</span></div>
-  <nav class="links">
-    <a data-page="cameras" class="active">Cameras</a>
-    <a data-page="live">Live view</a>
-    <a data-page="recordings">Recordings</a>
-    <a data-page="rules">Rules</a>
-    <a data-page="modes">Home / Away</a>
-    <a data-page="people">People</a>
-    <a data-page="system">System</a>
+<aside id="topnav">
+  <div class="brand"><img src="mark.svg" alt=""><span>Porchlight<small>Your home, in view.</small></span></div>
+  <nav class="links" aria-label="Main navigation">
+    <div class="nav-label">Monitor</div>
+    <a data-page="cameras" class="active"><span class="nav-icon">⌂</span>Home</a>
+    <a data-page="live"><span class="nav-icon">◉</span>Live view</a>
+    <a data-page="recordings"><span class="nav-icon">▶</span>Recordings</a>
+    <div class="nav-label">Manage</div>
+    <a data-page="rules"><span class="nav-icon">↯</span>Rules & alerts</a>
+    <a data-page="modes"><span class="nav-icon">◇</span>Home / Away</a>
+    <a data-page="people"><span class="nav-icon">◎</span>People</a>
+    <a data-page="system"><span class="nav-icon">⚙</span>Settings</a>
   </nav>
-  <div class="spacer"></div>
-  <button id="theme-btn" class="link" title="Switch between dark and light"></button>
-  <div id="health" class="health"></div>
-</header>
+  <div class="nav-footer">
+    <div id="health" class="health"></div>
+    <button id="theme-btn" class="theme-btn" title="Switch between dark and light"></button>
+  </div>
+</aside>
 
 <main>
   <section id="page-cameras" class="page">
-    <header><h1>Cameras</h1><div class="row"><button id="btn-live">Start live views</button><button class="primary" id="btn-add">Add a camera</button></div></header>
+    <header><div><p class="eyebrow">Overview</p><h1>Your home</h1><p class="lede">See what matters at a glance.</p></div><div class="row"><button id="btn-live">Open live view</button><button class="primary" id="btn-add">Add camera</button></div></header>
     <div id="tiles" class="tiles"></div>
     <div id="snooze-bar" class="row hidden"></div>
+    <div class="section-heading"><h2>Your cameras</h2><span id="camera-count" class="muted"></span></div>
     <div id="camera-grid" class="grid"></div>
+    <div class="section-heading"><h2>Recent activity</h2><a href="#recordings">All recordings ↗</a></div>
+    <div id="recent-activity" class="list"></div>
   </section>
 
   <section id="page-live" class="page hidden">
     <header>
-      <h1>Live view</h1>
+      <div><p class="eyebrow">Monitor</p><h1>Live view</h1><p class="lede">A closer look at home, right now.</p></div>
       <div class="toolbar">
         <label>Layout
           <select id="live-layout">
@@ -63,7 +69,7 @@
 
   <section id="page-recordings" class="page hidden">
     <header>
-      <h1>Recordings</h1>
+      <div><p class="eyebrow">Activity</p><h1>Recordings</h1><p class="lede">Find a moment. Keep what matters.</p></div>
       <div class="toolbar">
         <label>Camera <select id="rec-camera"><option value="">All</option></select></label>
         <label>Day <input type="date" id="rec-date"></label>
@@ -90,7 +96,7 @@
   </section>
 
   <section id="page-rules" class="page hidden">
-    <header><h1>Rules</h1><div><button class="primary" id="btn-rule">New rule</button></div></header>
+    <header><div><p class="eyebrow">Automation</p><h1>Rules & alerts</h1><p class="lede">Choose what deserves your attention.</p></div><div><button class="primary" id="btn-rule">New rule</button></div></header>
     <p class="hint">Rules run in the background and act on recordings as they arrive.</p>
     <div id="rule-list" class="list"></div>
     <h2>Phone alerts</h2>
@@ -128,7 +134,7 @@
   </section>
 
   <section id="page-modes" class="page hidden">
-    <header><h1>Home / Away</h1></header>
+    <header><div><p class="eyebrow">Routines</p><h1>Home / Away</h1><p class="lede">Set your cameras to match your day.</p></div></header>
     <p class="hint">Pick what the cameras do when you're in or out.</p>
     <div class="row big-toggles" id="state-buttons"></div>
     <h2>What each mode does</h2>
@@ -148,7 +154,7 @@
   </section>
 
   <section id="page-people" class="page hidden">
-    <header><h1>People</h1><div><button class="primary" id="btn-user">Add a person</button></div></header>
+    <header><div><p class="eyebrow">Access</p><h1>People</h1><p class="lede">Manage accounts in your ZoneMinder camera system.</p></div><div><button class="primary" id="btn-user">Add a person</button></div></header>
     <div class="card pad">
       <label class="check"><input type="checkbox" id="auth-on"> Ask for a password before showing cameras</label>
       <p class="hint">Turn this on if other people use this computer or you open the cameras to your network.</p>
@@ -157,23 +163,29 @@
   </section>
 
   <section id="page-system" class="page hidden">
-    <header><h1>System</h1><div><button id="btn-restart">Restart the camera system</button></div></header>
+    <header><div><p class="eyebrow">Administration</p><h1>Settings</h1><p class="lede">Storage, diagnostics and advanced ZoneMinder controls.</p></div><div><button id="btn-restart">Restart camera system</button></div></header>
+    <nav id="settings-nav" class="tabs" aria-label="Settings sections"></nav>
+    <section class="settings-section" data-settings="diagnostics">
     <div id="sys-summary" class="grid"></div>
-    <h2>Watch from your phone</h2>
+    </section>
+    <section class="settings-section" data-settings="access">
+    <h2>View from another device</h2>
     <div class="card pad">
-      <label class="check"><input type="checkbox" id="lan-on"> Let phones on my Wi-Fi view cameras</label>
+      <label class="check"><input type="checkbox" id="lan-on"> Allow access from other devices on my network</label>
       <p class="hint">Off by default: the app is only visible on this computer. Turned on,
         anyone on your home network can reach it — so it always asks for this password first.</p>
       <div class="fields">
-        <label>Password for phones <input type="password" id="lan-pw" placeholder="(unchanged)"></label>
+        <label>Network access password <input type="password" id="lan-pw" placeholder="(unchanged)"></label>
       </div>
       <div class="row">
         <button id="lan-save" class="primary">Save</button>
         <span id="lan-msg" class="muted"></span>
       </div>
-      <p class="hint">On your phone's browser, go to <strong><span id="lan-url">—</span></strong>,
-        then use “Add to Home Screen” to keep it one tap away.</p>
+      <p class="hint">In a browser on the same network, open <strong><span id="lan-url">—</span></strong>.
+        On a phone, use “Add to Home Screen” for quick access.</p>
     </div>
+    </section>
+    <section class="settings-section" data-settings="integrations">
     <h2>Home automation</h2>
     <div class="card pad">
       <p class="hint">Porchlight can announce every event on an MQTT broker, so Home
@@ -192,6 +204,12 @@
       <p class="hint">Events arrive on <code>topic/event/&lt;camera&gt;</code> and camera
         health on <code>topic/camera/&lt;camera&gt;/status</code>.</p>
     </div>
+    </section>
+    <section class="settings-section" data-settings="storage">
+    <h2>Storage & retention</h2>
+    <p class="hint">Choose how long recordings stay. Retention rules saved here exclude recordings marked Keep forever. Review existing ZoneMinder filters separately.</p>
+    <div id="retention-rules" class="list"></div>
+    <button id="retention-add">Add retention rule</button>
     <h2>Backup</h2>
     <div class="card pad">
       <p class="hint">Everything Porchlight knows — cameras, rules, settings — in one small
@@ -203,27 +221,35 @@
         <span id="restore-msg" class="muted"></span>
       </div>
     </div>
-    <h2>Common settings</h2>
+    </section>
+    <section class="settings-section" data-settings="advanced">
+    <h2 id="storage-settings">Common settings</h2>
     <div id="sys-simple" class="list"></div>
-    <h2>All settings (expert)</h2>
+    <h2 id="advanced-settings">Advanced ZoneMinder settings</h2>
     <p class="hint">Every ZoneMinder option, exactly as it is stored. Changing these can stop cameras working.</p>
-    <div class="row"><input id="cfg-search" placeholder="Search settings"></div>
+    <div class="row"><input id="cfg-search" aria-label="Search ZoneMinder settings" placeholder="Search by field name or description"></div>
     <div id="cfg-list" class="list scroll"></div>
-    <h2>Log</h2>
+    <div class="row"><span id="cfg-dirty" role="status" class="muted">No unsaved changes</span><button id="cfg-apply" class="primary" disabled>Apply changes</button><button id="cfg-discard" disabled>Discard</button></div>
+    </section>
+    <section class="settings-section" data-settings="diagnostics">
+    <h2 id="diagnostics">Diagnostics</h2>
     <div class="row"><button id="btn-logs">Show recent log</button></div>
     <pre id="log-out" class="log hidden"></pre>
+    </section>
+    <section class="settings-section" data-settings="advanced">
     <h2>ZoneMinder itself</h2>
     <p class="hint">The parts Porchlight doesn't wrap — the timeline, the event search grid,
       storage areas and server groups — live in ZoneMinder's own pages. Same cameras, same
       recordings, same database.</p>
     <div class="row"><a id="zm-link" href="http://localhost/zm/" target="_blank" rel="noreferrer">
-      <button>Open ZoneMinder</button></a></div>
+      <button>Open ZoneMinder console ↗</button></a></div>
+    </section>
   </section>
 </main>
 
-<div id="modal" class="modal hidden"><div class="sheet" id="modal-body"></div></div>
-<div id="viewer" class="viewer hidden"></div>
-<div id="toast" class="toast hidden"></div>
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Porchlight dialog" tabindex="-1"><div class="sheet" id="modal-body"></div></div>
+<div id="viewer" class="viewer hidden" role="dialog" aria-modal="true" aria-label="Video viewer" tabindex="-1"></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
 <script src="app.js"></script>
 </body>

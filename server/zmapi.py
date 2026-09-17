@@ -655,6 +655,7 @@ def rule_to_filter(rule):
     days = rule.get("delete_after_days")
     if days:
         terms.append(joined({"attr": "StartDateTime", "op": "<", "val": "-%d day" % int(days)}))
+        terms.append(joined({"attr": "Archived", "op": "=", "val": "0"}))
     if not terms:
         terms.append({"attr": "Id", "op": ">=", "val": "0"})
 

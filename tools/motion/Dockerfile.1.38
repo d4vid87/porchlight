@@ -1,0 +1,7 @@
+# Build the base worker first; this upgrades only the isolated engine.
+FROM porchlight-motion:1.36.33
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common ca-certificates \
+    && add-apt-repository -y ppa:iconnor/zoneminder-1.38 \
+    && apt-get update && apt-get install -y --no-install-recommends zoneminder=1.38.4-noble1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY motion-worker.py /usr/local/bin/porchlight-motion-worker

@@ -117,6 +117,7 @@ assert plain == [{"attr": "Id", "op": ">=", "val": "0"}], plain
 old = z.rule_to_filter({"name": "Tidy", "delete_after_days": 14})
 assert old["Filter[AutoDelete]"] == "1"
 assert any(t["val"] == "-14 day" for t in json.loads(old["Filter[Query]"])["terms"])
+assert any(t["attr"] == "Archived" and t["val"] == "0" for t in json.loads(old["Filter[Query]"])["terms"])
 
 # --- filter -> plain rule (the parts the Rules page shows)
 back = z.filter_to_rule({"Id": "7", "Name": "Night alerts", "Query": ff["Filter[Query]"],
