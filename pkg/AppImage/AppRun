@@ -15,7 +15,7 @@ fi
 
 url="http://127.0.0.1:${PORCHLIGHT_PORT:-8321}/"
 if "$python" -c 'import socket,sys; s=socket.socket(); s.settimeout(.2); sys.exit(s.connect_ex(("127.0.0.1", int(sys.argv[1]))))' "${PORCHLIGHT_PORT:-8321}"; then
-    exec xdg-open "$url"
+    exec env -u PYTHONHOME -u LD_LIBRARY_PATH xdg-open "$url"
 fi
 
 "$python" "$server" &
@@ -28,5 +28,5 @@ while [ "$i" -lt 50 ]; do
     i=$((i + 1))
     sleep .1
 done
-xdg-open "$url" >/dev/null 2>&1 || true
+env -u PYTHONHOME -u LD_LIBRARY_PATH xdg-open "$url" >/dev/null 2>&1 || true
 wait "$pid"
